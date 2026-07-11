@@ -411,9 +411,14 @@ async def search_prompt(msg: types.Message):
 @dp.inline_query()
 async def inline_search(query: InlineQuery):
     user_id = query.from_user.id
+    logging.info(f"inline_query از {user_id}: {query.query!r}")
     if not is_allowed(user_id):
         return await query.answer(
-            [], switch_pm_text="شما اجازه استفاده ندارید", switch_pm_parameter="start"
+            [],
+            switch_pm_text="شما اجازه استفاده ندارید",
+            switch_pm_parameter="start",
+            cache_time=1,
+            is_personal=True,
         )
 
     q = query.query.strip()
@@ -1831,13 +1836,15 @@ async def youtube_get_url(msg: types.Message):
                 ]
             )
 
-        # دکمه MP3 با بهترین کیفیت
+        # دکمه‌های صوتی: سه کیفیت
         kb_rows.append(
             [
-                InlineKeyboardButton(
-                    text="🎵 MP3 (بهترین کیفیت)", callback_data="ytdl_mp3_best"
-                )
+                InlineKeyboardButton(text="🎵 MP3 128", callback_data="ytdl_audio_128"),
+                InlineKeyboardButton(text="🎵 MP3 320", callback_data="ytdl_audio_320"),
             ]
+        )
+        kb_rows.append(
+            [InlineKeyboardButton(text="🎼 FLAC", callback_data="ytdl_audio_flac")]
         )
 
         kb_rows.append(
@@ -1919,22 +1926,30 @@ async def youtube_download_callback(callback: types.CallbackQuery):
                 except:
                     pass
 
-        if data == "ytdl_mp3_best":
-            # دانلود MP3 با بهترین کیفیت
-            ydl_opts = {
-                "format": "bestaudio/best",
-                "outtmpl": os.path.join(tmp_dir, "%(title)s.%(ext)s"),
-                "postprocessors": [
+        if data.startswith("ytdl_audio_"):
+            aq = data.replace("ytdl_audio_", "")  # 128 / 320 / flac
+            if aq == "flac":
+                postprocessors = [
+                    {"key": "FFmpegExtractAudio", "preferredcodec": "flac"}
+                ]
+                file_label = "🎼 FLAC"
+            else:
+                postprocessors = [
                     {
                         "key": "FFmpegExtractAudio",
                         "preferredcodec": "mp3",
-                        "preferredquality": "320",
+                        "preferredquality": aq,
                     }
-                ],
+                ]
+                file_label = f"🎵 MP3 {aq}K"
+            ydl_opts = {
+                "format": "bestaudio/best",
+                "outtmpl": os.path.join(tmp_dir, "%(title)s.%(ext)s"),
+                "postprocessors": postprocessors,
                 "quiet": True,
                 "progress_hooks": [progress_hook],
             }
-            file_label = "🎵 MP3"
+            is_audio = True
 
         elif data.startswith("ytdl_video_"):
             height = data.replace("ytdl_video_", "")
@@ -1947,6 +1962,7 @@ async def youtube_download_callback(callback: types.CallbackQuery):
                 "progress_hooks": [progress_hook],
             }
             file_label = f"🎬 {height}p"
+            is_audio = False
         else:
             await progress_msg.edit_text("❌ گزینه نامعتبر.")
             return
@@ -1988,7 +2004,7 @@ async def youtube_download_callback(callback: types.CallbackQuery):
 
         input_file = FSInputFile(file_path, filename=os.path.basename(file_path))
 
-        if data == "ytdl_mp3_best":
+        if is_audio:
             await callback.message.answer_audio(
                 audio=input_file, title=title, caption=f"🎵 {title}\n{file_label}"
             )
@@ -2153,10 +2169,59 @@ async def spotify_download_callback(callback: types.CallbackQuery):
         )
 
         # پیدا کردن فایل‌های دانلود شده
-        extensions = ["*.mp3", "*.flac", "*.m4a", "*.ogg"]
+        extensions = ["*.mp3", "*.flac", "*.m4a", "*.ogg", "*.wav"]
         downloaded_files = []
         for ext in extensions:
             downloaded_files.extend(Path(tmp_dir).glob(ext))
+
+        # اگر spotdl چیزی نگرفت، fallback به yt-dlp با جستجوی نام آهنگ
+        if not downloaded_files:
+            await update_progress_message(
+                progress_msg,
+                f"⬇️ **دانلود {quality_label}**\n\n"
+                f"{make_progress_bar(60)}\n\n"
+                f"⏳ تلاش با روش جایگزین...",
+            )
+
+            def do_fallback():
+                import yt_dlp
+
+                # نام آهنگ را از متادیتای اسپاتیفای می‌گیریم
+                meta_opts = {"quiet": True, "no_warnings": True}
+                query = url
+                try:
+                    with yt_dlp.YoutubeDL(meta_opts) as ydl:
+                        meta = ydl.extract_info(url, download=False)
+                        t = meta.get("title") or meta.get("track") or ""
+                        a = meta.get("artist") or meta.get("uploader") or ""
+                        if t:
+                            query = f"{t} {a}".strip()
+                except Exception:
+                    pass
+
+                if quality_val == "flac":
+                    pp = [{"key": "FFmpegExtractAudio", "preferredcodec": "flac"}]
+                else:
+                    pp = [
+                        {
+                            "key": "FFmpegExtractAudio",
+                            "preferredcodec": "mp3",
+                            "preferredquality": quality_val,
+                        }
+                    ]
+                fb_opts = {
+                    "format": "bestaudio/best",
+                    "outtmpl": os.path.join(tmp_dir, "%(title)s.%(ext)s"),
+                    "postprocessors": pp,
+                    "quiet": True,
+                    "default_search": "ytsearch1",
+                }
+                with yt_dlp.YoutubeDL(apply_cookies(fb_opts)) as ydl:
+                    ydl.download([f"ytsearch1:{query}"])
+
+            await loop.run_in_executor(None, do_fallback)
+            for ext in extensions:
+                downloaded_files.extend(Path(tmp_dir).glob(ext))
 
         if not downloaded_files:
             await progress_msg.edit_text(
@@ -2517,7 +2582,7 @@ async def soundcloud_do_search(msg: types.Message):
         def do_search():
             ydl_opts = {
                 "quiet": True,
-                "extract_flat": True,
+                "extract_flat": "in_playlist",
                 "no_warnings": True,
             }
             with yt_dlp.YoutubeDL(apply_cookies(ydl_opts)) as ydl:
@@ -2538,7 +2603,14 @@ async def soundcloud_do_search(msg: types.Message):
         for i, entry in enumerate(entries[:10], 1):
             title = entry.get("title", "نامشخص")
             uploader = entry.get("uploader", "نامشخص")
-            url = entry.get("url") or entry.get("webpage_url", "")
+            # با extract_flat گاهی url ناقص است؛ اولویت با webpage_url سپس url سپس permalink
+            url = (
+                entry.get("webpage_url")
+                or entry.get("url")
+                or entry.get("permalink_url", "")
+            )
+            if not url:
+                continue
             duration = entry.get("duration", 0)
             dur_str = (
                 f"{int(duration) // 60}:{int(duration) % 60:02d}" if duration else "?"
