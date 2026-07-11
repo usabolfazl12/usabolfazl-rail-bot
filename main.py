@@ -254,6 +254,14 @@ def downloader_kb():
 LOCAL_API_URL = os.getenv("TG_API_URL", "").strip()
 
 if LOCAL_API_URL:
+    # نرمال‌سازی آدرس: اگر http:// و پورت را ننوشته باشی، خودمان اضافه می‌کنیم
+    if not LOCAL_API_URL.startswith(("http://", "https://")):
+        LOCAL_API_URL = "http://" + LOCAL_API_URL
+    # اگر پورتی مشخص نشده، پیش‌فرض 8081 (پورت سرور Bot API محلی)
+    _after_scheme = LOCAL_API_URL.split("://", 1)[1]
+    if ":" not in _after_scheme.split("/", 1)[0]:
+        LOCAL_API_URL = LOCAL_API_URL.rstrip("/") + ":8081"
+
     # با سرور محلی سقف ۲ گیگابایت است
     MAX_UPLOAD_SIZE = 2 * 1024 * 1024 * 1024
     MAX_UPLOAD_LABEL = "2GB"
