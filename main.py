@@ -433,6 +433,12 @@ async def inline_search(query: InlineQuery):
         term = q
 
     rows = []
+    # تضمین وجود جدول استفاده‌ی شخصی (مثلاً بعد از ریستور دیتابیسی که این جدول را ندارد)
+    cur.execute(
+        "CREATE TABLE IF NOT EXISTS user_meme_usage("
+        "user_id INTEGER, meme_id INTEGER, used_at TEXT, "
+        "PRIMARY KEY (user_id, meme_id))"
+    )
     # با LEFT JOIN استفاده‌ی شخصی هر کاربر را می‌آوریم و اول بر اساس آن مرتب می‌کنیم،
     # سپس بر اساس last_used سراسری. این باعث می‌شود میم‌هایی که خودِ کاربر
     # اخیراً استفاده کرده در صدر نتایج inline او بیایند.
@@ -512,7 +518,14 @@ async def inline_search(query: InlineQuery):
                 )
             )
 
-    await query.answer(results, cache_time=1, is_personal=True)
+    try:
+        await query.answer(results, cache_time=1, is_personal=True)
+    except Exception as e:
+        logging.exception("inline answer error")
+        try:
+            await query.answer([], cache_time=1, is_personal=True)
+        except Exception:
+            pass
 
 
 # ثبت انتخاب inline: وقتی کاربر یک میم را از حالت inline انتخاب و ارسال می‌کند،
