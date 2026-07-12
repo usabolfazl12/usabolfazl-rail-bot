@@ -1203,23 +1203,33 @@ async def restore_database_finish(msg: types.Message):
 
     tmp_path = DB + ".incoming"
     try:
-        # دانلود فایل ورودی: به جای bot.download (که روی سرور محلی دانلود می‌کند)،
-        # از روش دستی استفاده می‌کنیم که روی کانتینر خودِ ربات دانلود شود.
+        # دانلود فایل ورودی: هوشمندانه برای سرور محلی و عمومی
         file_info = await bot.get_file(doc.file_id)
-        if LOCAL_API_URL:
-            # در حالت محلی، فایل ممکن است روی حجم سرور باشد؛ 
-            # پس مستقیم از لینک دانلود می‌کنیم
-            file_url = f"{LOCAL_API_URL.rstrip('/')}/file/bot{BOT_TOKEN}/{file_info.file_path}"
+        
+        # اگر سرور محلی باشد، file_path یک مسیر مطلق روی هارد است
+        if LOCAL_API_URL and os.path.isabs(file_info.file_path):
+            # کپی مستقیم فایل از هارد سرور (بدون نیاز به لینک دانلود)
+            # توجه: این در صورتی کار می‌کند که ربات و سرور به یک Volume مشترک وصل باشند
+            if os.path.exists(file_info.file_path):
+                shutil.copy(file_info.file_path, tmp_path)
+            else:
+                # اگر در کانتینر جدا هستند، از لینک دانلود استفاده می‌کنیم
+                # با این تفاوت که آدرس را تمیز می‌کنیم
+                p = file_info.file_path.replace("\\", "/").split("/")[-1]
+                file_url = f"{LOCAL_API_URL.rstrip('/')}/file/bot{BOT_TOKEN}/{p}"
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(file_url) as resp:
+                        if resp.status == 200:
+                            with open(tmp_path, "wb") as f: f.write(await resp.read())
+                        else: return await msg.answer(f"❌ خطا 404 یا مشابه در سرور محلی", reply_markup=admin_kb())
         else:
+            # حالت سرور عمومی تلگرام
             file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
-            
-        async with aiohttp.ClientSession() as session:
-            async with session.get(file_url) as resp:
-                if resp.status == 200:
-                    with open(tmp_path, "wb") as f:
-                        f.write(await resp.read())
-                else:
-                    return await msg.answer(f"❌ خطا در دانلود فایل دیتابیس (Status: {resp.status})", reply_markup=admin_kb())
+            async with aiohttp.ClientSession() as session:
+                async with session.get(file_url) as resp:
+                    if resp.status == 200:
+                        with open(tmp_path, "wb") as f: f.write(await resp.read())
+                    else: return await msg.answer(f"❌ خطا در دانلود از تلگرام", reply_markup=admin_kb())
 
         # اعتبارسنجی: باید SQLite معتبر باشد و جدول memes داشته باشد
         test_conn = sqlite3.connect(tmp_path)
@@ -1842,47 +1852,36 @@ async def youtube_get_url(msg: types.Message):
 
         context_data[msg.from_user.id]["title"] = title
 
-        # جمع‌آوری کیفیت‌های ویدیویی منحصربه‌فرد (هوشمندتر برای کیفیت‌های بالا)
+        # دریافت همه‌ی فرمت‌های موجود با جزئیات کامل
         formats = info.get("formats", [])
         video_qualities = {}
-
+        
+        # اسکن دقیق تمام فرمت‌ها
         for f in formats:
-            # هم فرمت‌های ترکیبی و هم فرمت‌های فقط ویدیو (که بعداً با صدا ترکیب می‌شوند)
-            height = f.get("height")
-            if height and height >= 144:
-                key = f"{height}p"
-                # اگر این کیفیت را قبلاً ندیدیم یا این یکی حجمش بیشتره (کیفیت بهتر)
-                if key not in video_qualities:
-                    video_qualities[key] = height
+            h = f.get("height")
+            # ما هم فرمت‌های ویدیویی (vcodec != none) و هم رزولوشن‌دارها رو می‌خوایم
+            if h and h >= 144:
+                # اگر کیفیت جدید بود یا این فرمت بیت‌ریت بالاتری داشت
+                if h not in video_qualities or f.get("vbr", 0) > video_qualities[h].get("vbr", 0):
+                    video_qualities[h] = f
 
-        # مرتب‌سازی بر اساس کیفیت (بالاترین اول)
-        sorted_qualities = sorted(
-            video_qualities.items(), key=lambda x: x[1], reverse=True
-        )
-
-        # ساخت کیبورد انتخاب کیفیت
+        # مرتب‌سازی: بالاترین رزولوشن اول
+        sorted_heights = sorted(video_qualities.keys(), reverse=True)
+        
         kb_rows = []
+        for h in sorted_heights:
+            kb_rows.append([
+                InlineKeyboardButton(text=f"🎬 {h}p", callback_data=f"ytdl_video_{h}")
+            ])
 
-        # دکمه‌های کیفیت ویدیو
-        for quality_name, height in sorted_qualities:
-            kb_rows.append(
-                [
-                    InlineKeyboardButton(
-                        text=f"🎬 {quality_name}", callback_data=f"ytdl_video_{height}"
-                    )
-                ]
-            )
-
-        # دکمه‌های صوتی: سه کیفیت
-        kb_rows.append(
-            [
-                InlineKeyboardButton(text="🎵 MP3 128", callback_data="ytdl_audio_128"),
-                InlineKeyboardButton(text="🎵 MP3 320", callback_data="ytdl_audio_320"),
-            ]
-        )
-        kb_rows.append(
-            [InlineKeyboardButton(text="🎼 FLAC", callback_data="ytdl_audio_flac")]
-        )
+        # دکمه‌های صوتی
+        kb_rows.append([
+            InlineKeyboardButton(text="🎵 MP3 128", callback_data="ytdl_audio_128"),
+            InlineKeyboardButton(text="🎵 MP3 320", callback_data="ytdl_audio_320"),
+        ])
+        kb_rows.append([
+            InlineKeyboardButton(text="🎼 FLAC", callback_data="ytdl_audio_flac")
+        ])
 
         kb_rows.append(
             [InlineKeyboardButton(text="❌ لغو", callback_data="ytdl_cancel")]
