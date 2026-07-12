@@ -1203,8 +1203,23 @@ async def restore_database_finish(msg: types.Message):
 
     tmp_path = DB + ".incoming"
     try:
-        # دانلود فایل ورودی
-        await bot.download(doc, destination=tmp_path)
+        # دانلود فایل ورودی: به جای bot.download (که روی سرور محلی دانلود می‌کند)،
+        # از روش دستی استفاده می‌کنیم که روی کانتینر خودِ ربات دانلود شود.
+        file_info = await bot.get_file(doc.file_id)
+        if LOCAL_API_URL:
+            # در حالت محلی، فایل ممکن است روی حجم سرور باشد؛ 
+            # پس مستقیم از لینک دانلود می‌کنیم
+            file_url = f"{LOCAL_API_URL.rstrip('/')}/file/bot{BOT_TOKEN}/{file_info.file_path}"
+        else:
+            file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
+            
+        async with aiohttp.ClientSession() as session:
+            async with session.get(file_url) as resp:
+                if resp.status == 200:
+                    with open(tmp_path, "wb") as f:
+                        f.write(await resp.read())
+                else:
+                    return await msg.answer(f"❌ خطا در دانلود فایل دیتابیس (Status: {resp.status})", reply_markup=admin_kb())
 
         # اعتبارسنجی: باید SQLite معتبر باشد و جدول memes داشته باشد
         test_conn = sqlite3.connect(tmp_path)
@@ -1827,19 +1842,20 @@ async def youtube_get_url(msg: types.Message):
 
         context_data[msg.from_user.id]["title"] = title
 
-        # جمع‌آوری کیفیت‌های ویدیویی منحصربه‌فرد
+        # جمع‌آوری کیفیت‌های ویدیویی منحصربه‌فرد (هوشمندتر برای کیفیت‌های بالا)
         formats = info.get("formats", [])
         video_qualities = {}
 
         for f in formats:
+            # هم فرمت‌های ترکیبی و هم فرمت‌های فقط ویدیو (که بعداً با صدا ترکیب می‌شوند)
             height = f.get("height")
-            vcodec = f.get("vcodec", "none")
-            if height and vcodec != "none":
+            if height and height >= 144:
                 key = f"{height}p"
+                # اگر این کیفیت را قبلاً ندیدیم یا این یکی حجمش بیشتره (کیفیت بهتر)
                 if key not in video_qualities:
                     video_qualities[key] = height
 
-        # مرتب‌سازی بر اساس کیفیت
+        # مرتب‌سازی بر اساس کیفیت (بالاترین اول)
         sorted_qualities = sorted(
             video_qualities.items(), key=lambda x: x[1], reverse=True
         )
@@ -1974,9 +1990,10 @@ async def youtube_download_callback(callback: types.CallbackQuery):
 
         elif data.startswith("ytdl_video_"):
             height = data.replace("ytdl_video_", "")
-            # دانلود ویدیو با کیفیت مشخص
+            # دانلود ویدیو: ترکیب بهترین کیفیت ویدیو (تا سقف مشخص شده) + بهترین صدا
+            # این باعث می‌شود کیفیت‌های بالای 720p هم با صدا دانلود شوند.
             ydl_opts = {
-                "format": f"bestvideo[height<={height}]+bestaudio/best[height<={height}]",
+                "format": f"bestvideo[height<={height}]+bestaudio/best",
                 "outtmpl": os.path.join(tmp_dir, "%(title)s.%(ext)s"),
                 "merge_output_format": "mp4",
                 "quiet": True,
