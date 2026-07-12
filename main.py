@@ -1203,35 +1203,28 @@ async def restore_database_finish(msg: types.Message):
 
     tmp_path = DB + ".incoming"
     try:
-        # دانلود فایل ورودی: هوشمندانه برای سرور محلی و عمومی
         file_info = await bot.get_file(doc.file_id)
-        
-        # اگر سرور محلی باشد، file_path یک مسیر مطلق روی هارد است
-        if LOCAL_API_URL and os.path.isabs(file_info.file_path):
-            # کپی مستقیم فایل از هارد سرور (بدون نیاز به لینک دانلود)
-            # توجه: این در صورتی کار می‌کند که ربات و سرور به یک Volume مشترک وصل باشند
-            if os.path.exists(file_info.file_path):
-                shutil.copy(file_info.file_path, tmp_path)
-            else:
-                # اگر در کانتینر جدا هستند، از لینک دانلود استفاده می‌کنیم
-                # با این تفاوت که آدرس را تمیز می‌کنیم
-                p = file_info.file_path.replace("\\", "/").split("/")[-1]
-                file_url = f"{LOCAL_API_URL.rstrip('/')}/file/bot{BOT_TOKEN}/{p}"
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(file_url) as resp:
-                        if resp.status == 200:
-                            with open(tmp_path, "wb") as f: f.write(await resp.read())
-                        else: return await msg.answer(f"❌ خطا 404 یا مشابه در سرور محلی", reply_markup=admin_kb())
-        else:
-            # حالت سرور عمومی تلگرام
-            file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
-            async with aiohttp.ClientSession() as session:
-                async with session.get(file_url) as resp:
-                    if resp.status == 200:
-                        with open(tmp_path, "wb") as f: f.write(await resp.read())
-                    else: return await msg.answer(f"❌ خطا در دانلود از تلگرام", reply_markup=admin_kb())
+        path = file_info.file_path or ""
+        # استخراج نام فایل خالص
+        filename = path.split("/")[-1].split("\\")[-1]
 
-        # اعتبارسنجی: باید SQLite معتبر باشد و جدول memes داشته باشد
+        if LOCAL_API_URL:
+            file_url = f"{LOCAL_API_URL.rstrip('/')}/file/bot{BOT_TOKEN}/{filename}"
+        else:
+            file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{path.lstrip('/')}"
+
+        logging.info(f"[Restore] Downloading DB from: {file_url}")
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(file_url) as resp:
+                if resp.status == 200:
+                    with open(tmp_path, "wb") as f:
+                        f.write(await resp.read())
+                else:
+                    txt = await resp.text()
+                    logging.error(f"[Restore] Download failed: HTTP {resp.status} - {txt[:200]}")
+                    return await msg.answer(f"❌ خطا در دانلود (HTTP {resp.status})", reply_markup=admin_kb())
+
         test_conn = sqlite3.connect(tmp_path)
         try:
             names = {
@@ -1865,8 +1858,8 @@ async def youtube_get_url(msg: types.Message):
                 if h not in video_qualities or f.get("vbr", 0) > video_qualities[h].get("vbr", 0):
                     video_qualities[h] = f
 
-        # مرتب‌سازی: بالاترین رزولوشن اول
-        sorted_heights = sorted(video_qualities.keys(), reverse=True)
+        # مرتب‌سازی: صعودی (از 240p به بالا)
+                sorted_heights = sorted(video_qualities.keys())
         
         kb_rows = []
         for h in sorted_heights:
