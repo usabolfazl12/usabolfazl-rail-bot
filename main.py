@@ -1203,34 +1203,15 @@ async def restore_database_finish(msg: types.Message):
 
     tmp_path = DB + ".incoming"
     try:
-        file_info = await bot.get_file(doc.file_id)
-        path = (file_info.file_path or "").replace("\\", "/")
+        # دانلود مستقیم با aiogram — با سرور محلی (Local API) و سرور عادی هر دو سازگار است
+        # و نیازی به ساختن URL دستی ندارد (که روی Local API باعث 404 می‌شد)
+        try:
+            await bot.download(doc.file_id, destination=tmp_path)
+        except Exception as dl_err:
+            logging.error(f"[Restore] Download failed: {dl_err}")
+            return await msg.answer(f"❌ خطا در دانلود فایل: {dl_err}", reply_markup=admin_kb())
 
-        if LOCAL_API_URL:
-            # در حالت Local API، file_path یک «مسیر مطلق روی هارد سرور» است
-            # مثل: /var/lib/telegram-bot-api/<token>/documents/file_5.db
-            # برای دانلود HTTP فقط بخش بعد از توکن (مسیر نسبی) لازم است.
-            if BOT_TOKEN in path:
-                rel = path.split(BOT_TOKEN, 1)[1].lstrip("/")
-            else:
-                # اگر توکن در مسیر نبود، آخرین دو بخش را نسبی فرض کن
-                parts = [p for p in path.split("/") if p]
-                rel = "/".join(parts[-2:]) if len(parts) >= 2 else path.lstrip("/")
-            file_url = f"{LOCAL_API_URL.rstrip('/')}/file/bot{BOT_TOKEN}/{rel}"
-        else:
-            file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{path.lstrip('/')}"
-
-        logging.info(f"[Restore] Downloading DB from: {file_url}")
-
-        async with aiohttp.ClientSession() as session:
-            async with session.get(file_url) as resp:
-                if resp.status == 200:
-                    with open(tmp_path, "wb") as f:
-                        f.write(await resp.read())
-                else:
-                    txt = await resp.text()
-                    logging.error(f"[Restore] Download failed: HTTP {resp.status} - {txt[:200]}")
-                    return await msg.answer(f"❌ خطا در دانلود (HTTP {resp.status})", reply_markup=admin_kb())
+        logging.info(f"[Restore] DB downloaded to: {tmp_path}")
 
         test_conn = sqlite3.connect(tmp_path)
         try:
