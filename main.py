@@ -1204,12 +1204,19 @@ async def restore_database_finish(msg: types.Message):
     tmp_path = DB + ".incoming"
     try:
         file_info = await bot.get_file(doc.file_id)
-        path = file_info.file_path or ""
-        filename = path.split("/")[-1].split("\\")[-1]
+        path = (file_info.file_path or "").replace("\\", "/")
 
         if LOCAL_API_URL:
-            # در Local API مسیر کامل file_path باید استفاده شود
-            file_url = f"{LOCAL_API_URL.rstrip('/')}/file/bot{BOT_TOKEN}/{path.lstrip('/')}"
+            # در حالت Local API، file_path یک «مسیر مطلق روی هارد سرور» است
+            # مثل: /var/lib/telegram-bot-api/<token>/documents/file_5.db
+            # برای دانلود HTTP فقط بخش بعد از توکن (مسیر نسبی) لازم است.
+            if BOT_TOKEN in path:
+                rel = path.split(BOT_TOKEN, 1)[1].lstrip("/")
+            else:
+                # اگر توکن در مسیر نبود، آخرین دو بخش را نسبی فرض کن
+                parts = [p for p in path.split("/") if p]
+                rel = "/".join(parts[-2:]) if len(parts) >= 2 else path.lstrip("/")
+            file_url = f"{LOCAL_API_URL.rstrip('/')}/file/bot{BOT_TOKEN}/{rel}"
         else:
             file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{path.lstrip('/')}"
 
@@ -1828,6 +1835,13 @@ async def youtube_get_url(msg: types.Message):
             "quiet": True,
             "no_warnings": True,
             "extract_flat": False,
+            # روی IP دیتاسنتر (Railway) یوتیوب فرمت‌ها را محدود می‌کند.
+            # درخواست از چند کلاینت مختلف تا همه‌ی کیفیت‌ها برگردند.
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["android", "ios", "web", "tv"],
+                }
+            },
         }
 
         loop = asyncio.get_event_loop()
@@ -1861,7 +1875,10 @@ async def youtube_get_url(msg: types.Message):
 
         # مرتب‌سازی: صعودی (از 240p به بالا)
         sorted_heights = sorted(video_qualities.keys())
-        
+        logging.info(f"[YT] {len(sorted_heights)} کیفیت پیدا شد: {sorted_heights}")
+
+        if not sorted_heights:
+            logging.warning(f"[YT] هیچ کیفیتی پیدا نشد. تعداد کل فرمت‌ها: {len(info.get('formats', []))}")
         kb_rows = [ [InlineKeyboardButton(text="🔄 رفرش کیفیت‌ها", callback_data="ytdl_refresh")] ]
         for h in sorted_heights:
             kb_rows.append([
