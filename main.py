@@ -1202,6 +1202,7 @@ async def restore_database_finish(msg: types.Message):
         )
 
     tmp_path = DB + ".incoming"
+    logging.warning("=== RESTORE HANDLER v5 LOADED ===  using bot.download()")
     try:
         # دانلود مستقیم با aiogram — با سرور محلی (Local API) و سرور عادی هر دو سازگار است
         # و نیازی به ساختن URL دستی ندارد (که روی Local API باعث 404 می‌شد)
@@ -1782,13 +1783,14 @@ async def back_to_admin_from_downloader(msg: types.Message):
 # ==========================================
 
 
+
 @dp.message(F.text == "🎬 دانلود یوتیوب")
 async def youtube_downloader_start(msg: types.Message):
     if not is_admin(msg.from_user.id):
         return await msg.answer("دسترسی ندارید!")
     states[msg.from_user.id] = "yt_url"
     await msg.answer(
-        "🎬 **دانلود از یوتیوب**\n\nلینک ویدیوی یوتیوب را ارسال کنید:",
+        "🎬 **دانلود از یوتیوب**\n\nلینک ویدیو (youtube / youtu.be) را ارسال کنید:",
         reply_markup=back_kb(),
         parse_mode="Markdown",
     )
@@ -1797,17 +1799,15 @@ async def youtube_downloader_start(msg: types.Message):
 @dp.message(F.text, lambda m: states.get(m.from_user.id) == "yt_url")
 async def youtube_get_url(msg: types.Message):
     url = msg.text.strip()
-
-    # بررسی لینک یوتیوب
     yt_pattern = r"(https?://)?(www\.)?(youtube\.com|youtu\.be)/.+"
     if not re.match(yt_pattern, url):
         return await msg.answer("❌ لینک یوتیوب معتبر نیست. دوباره ارسال کنید.")
+    if "list=" in url:
+        url = url.split("&")[0]  # فقط ویدیو، پلی‌لیست نه
 
     context_data[msg.from_user.id] = {"yt_url": url}
     states[msg.from_user.id] = "yt_quality"
-
-    # دریافت کیفیت‌های موجود
-    wait_msg = await msg.answer("⏳ در حال دریافت اطلاعات ویدیو...")
+    wait = await msg.answer("⏳ در حال دریافت اطلاعات ویدیو...")
 
     try:
         import yt_dlp
@@ -1816,8 +1816,6 @@ async def youtube_get_url(msg: types.Message):
             "quiet": True,
             "no_warnings": True,
             "extract_flat": False,
-            # روی IP دیتاسنتر (Railway) یوتیوب فرمت‌ها را محدود می‌کند.
-            # درخواست از چند کلاینت مختلف تا همه‌ی کیفیت‌ها برگردند.
             "extractor_args": {
                 "youtube": {
                     "player_client": ["android", "ios", "web", "tv"],
@@ -1825,231 +1823,165 @@ async def youtube_get_url(msg: types.Message):
             },
         }
 
-        loop = asyncio.get_event_loop()
-
-        def get_formats():
+        def get_info():
             with yt_dlp.YoutubeDL(apply_cookies(ydl_opts)) as ydl:
-                info = ydl.extract_info(url, download=False)
-                return info
+                return ydl.extract_info(url, download=False)
 
-        info = await loop.run_in_executor(None, get_formats)
-
+        info = await asyncio.get_event_loop().run_in_executor(None, get_info)
         title = info.get("title", "ویدیو")
-        duration = info.get("duration", 0)
-        duration_str = f"{duration // 60}:{duration % 60:02d}" if duration else "نامشخص"
-
+        dur = info.get("duration", 0)
+        dur_s = f"{dur // 60}:{dur % 60:02d}" if dur else "نامشخص"
         context_data[msg.from_user.id]["title"] = title
 
-        # دریافت همه‌ی فرمت‌های موجود با جزئیات کامل
-        # اجبار به استخراج کامل فرمت‌ها (بدون extract_flat)
-        formats = [f for f in info.get("formats", []) if f.get("height") or f.get("vcodec") != "none"]
-        video_qualities = {}
-        
-        # اسکن دقیق تمام فرمت‌ها
-        for f in formats:
+        # جمع‌آوری همه‌ی کیفیت‌های ویدیویی (صعودی، بدون تکرار)
+        vq = {}
+        for f in info.get("formats", []):
             h = f.get("height")
-            # ما هم فرمت‌های ویدیویی (vcodec != none) و هم رزولوشن‌دارها رو می‌خوایم
-            if h and h >= 144:
-                # اگر کیفیت جدید بود یا این فرمت بیت‌ریت بالاتری داشت
-                if h not in video_qualities or f.get("vbr", 0) > video_qualities[h].get("vbr", 0):
-                    video_qualities[h] = f
+            if h and h >= 144 and f.get("vcodec", "none") != "none":
+                if h not in vq or (f.get("vbr", 0) or 0) > vq[h].get("vbr", 0):
+                    vq[h] = f
+        heights = sorted(vq.keys())
+        logging.info(f"[YT] {len(heights)} کیفیت: {heights}")
 
-        # مرتب‌سازی: صعودی (از 240p به بالا)
-        sorted_heights = sorted(video_qualities.keys())
-        logging.info(f"[YT] {len(sorted_heights)} کیفیت پیدا شد: {sorted_heights}")
-
-        if not sorted_heights:
-            logging.warning(f"[YT] هیچ کیفیتی پیدا نشد. تعداد کل فرمت‌ها: {len(info.get('formats', []))}")
-        kb_rows = [ [InlineKeyboardButton(text="🔄 رفرش کیفیت‌ها", callback_data="ytdl_refresh")] ]
-        for h in sorted_heights:
-            kb_rows.append([
-                InlineKeyboardButton(text=f"🎬 {h}p", callback_data=f"ytdl_video_{h}")
-            ])
-
-        # دکمه‌های صوتی
-        kb_rows.append([
+        kb = [
+            [InlineKeyboardButton(text="🔄 رفرش", callback_data="ytdl_refresh")],
+        ]
+        for h in heights:
+            kb.append([InlineKeyboardButton(text=f"🎬 {h}p", callback_data=f"ytdl_video_{h}")])
+        kb.append([
             InlineKeyboardButton(text="🎵 MP3 128", callback_data="ytdl_audio_128"),
             InlineKeyboardButton(text="🎵 MP3 320", callback_data="ytdl_audio_320"),
         ])
-        kb_rows.append([
-            InlineKeyboardButton(text="🎼 FLAC", callback_data="ytdl_audio_flac")
-        ])
+        kb.append([InlineKeyboardButton(text="🎼 FLAC", callback_data="ytdl_audio_flac")])
+        kb.append([InlineKeyboardButton(text="❌ لغو", callback_data="ytdl_cancel")])
 
-        kb_rows.append(
-            [InlineKeyboardButton(text="❌ لغو", callback_data="ytdl_cancel")]
-        )
-
-        kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
-
-        await wait_msg.edit_text(
-            f"🎬 **{title}**\n⏱ مدت: {duration_str}\n\nکیفیت مورد نظر را انتخاب کنید:",
-            reply_markup=kb,
+        await wait.edit_text(
+            f"🎬 **{title}**\n⏱ {dur_s}\n\nکیفیت را انتخاب کنید:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
             parse_mode="Markdown",
         )
-
     except Exception as e:
-        await wait_msg.edit_text(f"❌ خطا در دریافت اطلاعات ویدیو:\n{str(e)[:200]}")
+        await wait.edit_text(f"❌ خطا در دریافت اطلاعات:\n{str(e)[:200]}")
         states.pop(msg.from_user.id, None)
         context_data.pop(msg.from_user.id, None)
+
+
+@dp.callback_query(F.data == "ytdl_refresh")
+async def yt_refresh(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("دسترسی ندارید", show_alert=True)
+    await callback.answer("🔄")
+    saved = context_data.get(callback.from_user.id, {})
+    if not saved.get("yt_url"):
+        return await callback.message.edit_text("❌ لینک یافت نشد. دوباره شروع کنید.")
+    # فراخوانی مجدد هندلر اصلی با یک شیء پیام ساختگی
+    class _M:
+        text = saved["yt_url"]
+        from_user = callback.from_user
+    await youtube_get_url(_M())
 
 
 @dp.callback_query(F.data.startswith("ytdl_"))
 async def youtube_download_callback(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id):
         return await callback.answer("دسترسی ندارید", show_alert=True)
-
     data = callback.data
-    user_id = callback.from_user.id
-
+    uid = callback.from_user.id
     if data == "ytdl_cancel":
-        states.pop(user_id, None)
-        context_data.pop(user_id, None)
-        await callback.message.edit_text("❌ دانلود لغو شد.")
+        states.pop(uid, None)
+        context_data.pop(uid, None)
+        await callback.message.edit_text("❌ لغو شد.")
         return await callback.answer()
 
-    user_data = context_data.get(user_id, {})
-    url = user_data.get("yt_url")
-    title = user_data.get("title", "ویدیو")
-
+    ud = context_data.get(uid, {})
+    url = ud.get("yt_url")
+    title = ud.get("title", "ویدیو")
     if not url:
-        await callback.answer("خطا: لینک پیدا نشد.", show_alert=True)
-        return
+        return await callback.answer("خطا: لینک پیدا نشد.", show_alert=True)
 
     await callback.answer()
-    progress_msg = await callback.message.edit_text("⏳ در حال آماده‌سازی دانلود...")
+    prog = await callback.message.edit_text("⏳ در حال آماده‌سازی...")
+    states.pop(uid, None)
+    context_data.pop(uid, None)
 
-    states.pop(user_id, None)
-    context_data.pop(user_id, None)
-
-    tmp_dir = tempfile.mkdtemp()
-
+    tmp = tempfile.mkdtemp()
     try:
         import yt_dlp
 
-        last_percent = [0]
-
-        def progress_hook(d):
-            if d["status"] == "downloading":
+        last = [0]
+        def hook(d):
+            if d.get("status") == "downloading":
                 try:
-                    percent_str = d.get("_percent_str", "0%").strip().replace("%", "")
-                    percent = float(percent_str)
-
-                    # فقط هر 10% آپدیت کن
-                    if percent - last_percent[0] >= 10 or percent >= 99:
-                        last_percent[0] = percent
-                        bar = make_progress_bar(percent)
-                        speed = d.get("_speed_str", "نامشخص")
-                        eta = d.get("_eta_str", "نامشخص")
-
+                    p = float(d.get("_percent_str", "0%").replace("%", "").strip() or 0)
+                    if p - last[0] >= 10 or p >= 99:
+                        last[0] = p
                         asyncio.run_coroutine_threadsafe(
-                            update_progress_message(
-                                progress_msg,
-                                f"⬇️ **در حال دانلود...**\n\n"
-                                f"{bar}\n\n"
-                                f"🚀 سرعت: {speed}\n"
-                                f"⏳ زمان باقیمانده: {eta}",
+                            prog.edit_text(
+                                f"⬇️ **دانلود...**\n{make_progress_bar(p)}\n"
+                                f"🚀 {d.get('_speed_str','نامشخص')} | ⏳ {d.get('_eta_str','نامشخص')}",
+                                parse_mode="Markdown",
                             ),
                             asyncio.get_event_loop(),
                         )
-                except:
+                except Exception:
                     pass
 
-        if data.startswith("ytdl_audio_"):
-            aq = data.replace("ytdl_audio_", "")  # 128 / 320 / flac
-            if aq == "flac":
-                postprocessors = [
-                    {"key": "FFmpegExtractAudio", "preferredcodec": "flac"}
-                ]
-                file_label = "🎼 FLAC"
+        is_audio = data.startswith("ytdl_audio_")
+        if is_audio:
+            q = data.replace("ytdl_audio_", "")
+            if q == "flac":
+                post = [{"key": "FFmpegExtractAudio", "preferredcodec": "flac"}]
+                label = "🎼 FLAC"
             else:
-                postprocessors = [
-                    {
-                        "key": "FFmpegExtractAudio",
-                        "preferredcodec": "mp3",
-                        "preferredquality": aq,
-                    }
-                ]
-                file_label = f"🎵 MP3 {aq}K"
-            ydl_opts = {
+                post = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": q}]
+                label = f"🎵 MP3 {q}K"
+            opts = {
                 "format": "bestaudio/best",
-                "outtmpl": os.path.join(tmp_dir, "%(title)s.%(ext)s"),
-                "postprocessors": postprocessors,
+                "outtmpl": os.path.join(tmp, "%(title)s.%(ext)s"),
+                "postprocessors": post,
                 "quiet": True,
-                "progress_hooks": [progress_hook],
+                "progress_hooks": [hook],
             }
-            is_audio = True
-
-        elif data.startswith("ytdl_video_"):
-            height = data.replace("ytdl_video_", "")
-            # دانلود ویدیو: ترکیب بهترین کیفیت ویدیو (تا سقف مشخص شده) + بهترین صدا
-            # این باعث می‌شود کیفیت‌های بالای 720p هم با صدا دانلود شوند.
-            ydl_opts = {
-                "format": f"bestvideo[height<={height}]+bestaudio/best",
-                "outtmpl": os.path.join(tmp_dir, "%(title)s.%(ext)s"),
+        else:
+            h = data.replace("ytdl_video_", "")
+            label = f"🎬 {h}p"
+            opts = {
+                "format": f"bestvideo[height<={h}]+bestaudio/best",
+                "outtmpl": os.path.join(tmp, "%(title)s.%(ext)s"),
                 "merge_output_format": "mp4",
                 "quiet": True,
-                "progress_hooks": [progress_hook],
+                "progress_hooks": [hook],
             }
-            file_label = f"🎬 {height}p"
-            is_audio = False
-        else:
-            await progress_msg.edit_text("❌ گزینه نامعتبر.")
-            return
 
-        loop = asyncio.get_event_loop()
-
-        def do_download():
-            with yt_dlp.YoutubeDL(apply_cookies(ydl_opts)) as ydl:
+        def dl():
+            with yt_dlp.YoutubeDL(apply_cookies(opts)) as ydl:
                 ydl.download([url])
 
-        await progress_msg.edit_text(
-            f"⬇️ **در حال دانلود {file_label}...**\n\n"
-            f"{make_progress_bar(0)}\n\n"
-            f"⏳ لطفاً صبر کنید...",
-            parse_mode="Markdown",
-        )
+        await prog.edit_text(f"⬇️ **دانلود {label}...**\n{make_progress_bar(0)}\n⏳ صبر کنید...", parse_mode="Markdown")
+        await asyncio.get_event_loop().run_in_executor(None, dl)
 
-        await loop.run_in_executor(None, do_download)
+        files = [str(p) for p in Path(tmp).glob("*") if p.is_file()]
+        if not files:
+            return await prog.edit_text("❌ فایلی دانلود نشد!")
 
-        # پیدا کردن فایل دانلود شده
-        downloaded_files = list(Path(tmp_dir).glob("*"))
-        if not downloaded_files:
-            await progress_msg.edit_text("❌ فایلی دانلود نشد!")
-            return
-
-        file_path = str(downloaded_files[0])
-        file_size = os.path.getsize(file_path)
-
-        # بررسی حجم (سقف تلگرام)
-        if file_size > MAX_UPLOAD_SIZE:
-            await progress_msg.edit_text(
-                f"❌ حجم فایل ({file_size // (1024 * 1024)}MB) بیش از حد مجاز تلگرام ({MAX_UPLOAD_LABEL}) است!"
+        fp = files[0]
+        sz = os.path.getsize(fp)
+        if sz > MAX_UPLOAD_SIZE:
+            return await prog.edit_text(
+                f"❌ حجم ({sz // (1024*1024)}MB) بیش از {MAX_UPLOAD_LABEL} است!"
             )
-            return
 
-        await progress_msg.edit_text(
-            f"✅ دانلود کامل شد!\n📤 در حال آپلود به تلگرام..."
-        )
-
-        input_file = FSInputFile(file_path, filename=os.path.basename(file_path))
-
+        await prog.edit_text("✅ دانلود کامل شد!\n📤 در حال آپلود...")
+        inp = FSInputFile(fp, filename=os.path.basename(fp))
         if is_audio:
-            await callback.message.answer_audio(
-                audio=input_file, title=title, caption=f"🎵 {title}\n{file_label}"
-            )
+            await callback.message.answer_audio(audio=inp, title=title, caption=f"🎵 {title}\n{label}")
         else:
-            await callback.message.answer_video(
-                video=input_file,
-                caption=f"🎬 {title}\n{file_label}",
-                supports_streaming=True,
-            )
-
-        await progress_msg.delete()
-
+            await callback.message.answer_video(video=inp, caption=f"🎬 {title}\n{label}", supports_streaming=True)
+        await prog.delete()
     except Exception as e:
-        await progress_msg.edit_text(f"❌ خطا در دانلود:\n{str(e)[:300]}")
+        await prog.edit_text(f"❌ خطا در دانلود:\n{str(e)[:300]}")
     finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ==========================================
