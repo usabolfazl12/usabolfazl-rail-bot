@@ -1205,11 +1205,11 @@ async def restore_database_finish(msg: types.Message):
     try:
         file_info = await bot.get_file(doc.file_id)
         path = file_info.file_path or ""
-        # استخراج نام فایل خالص
         filename = path.split("/")[-1].split("\\")[-1]
 
         if LOCAL_API_URL:
-            file_url = f"{LOCAL_API_URL.rstrip('/')}/file/bot{BOT_TOKEN}/{filename}"
+            # در Local API مسیر کامل file_path باید استفاده شود
+            file_url = f"{LOCAL_API_URL.rstrip('/')}/file/bot{BOT_TOKEN}/{path.lstrip('/')}"
         else:
             file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{path.lstrip('/')}"
 
@@ -1846,7 +1846,8 @@ async def youtube_get_url(msg: types.Message):
         context_data[msg.from_user.id]["title"] = title
 
         # دریافت همه‌ی فرمت‌های موجود با جزئیات کامل
-        formats = info.get("formats", [])
+        # اجبار به استخراج کامل فرمت‌ها (بدون extract_flat)
+        formats = [f for f in info.get("formats", []) if f.get("height") or f.get("vcodec") != "none"]
         video_qualities = {}
         
         # اسکن دقیق تمام فرمت‌ها
@@ -1859,9 +1860,9 @@ async def youtube_get_url(msg: types.Message):
                     video_qualities[h] = f
 
         # مرتب‌سازی: صعودی (از 240p به بالا)
-                sorted_heights = sorted(video_qualities.keys())
+        sorted_heights = sorted(video_qualities.keys())
         
-        kb_rows = []
+        kb_rows = [ [InlineKeyboardButton(text="🔄 رفرش کیفیت‌ها", callback_data="ytdl_refresh")] ]
         for h in sorted_heights:
             kb_rows.append([
                 InlineKeyboardButton(text=f"🎬 {h}p", callback_data=f"ytdl_video_{h}")
