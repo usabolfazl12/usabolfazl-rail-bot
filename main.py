@@ -1190,6 +1190,8 @@ async def restore_database_start(msg: types.Message):
 
 
 
+
+
 @dp.message(F.document, lambda m: states.get(m.from_user.id) == "restore_db")
 async def restore_database_finish(msg: types.Message):
     global db, cur
@@ -1204,7 +1206,7 @@ async def restore_database_finish(msg: types.Message):
         )
 
     tmp_path = DB + ".incoming"
-    logging.warning("=== RESTORE HANDLER v9 (rebuilt) ===")
+    logging.warning("=== RESTORE HANDLER v10 (clean rebuilt) ===")
     try:
         # روش ۱: دانلود با aiogram (روی سرور محلی بهتر کار می‌کند)
         downloaded = False
@@ -1219,7 +1221,6 @@ async def restore_database_finish(msg: types.Message):
         if not downloaded or not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
             file_info = await bot.get_file(doc.file_id)
             raw = (file_info.file_path or "").replace("\\", "/")
-            # جدا کردن بخش نسبی: بعد از توکن
             rel = raw.split(BOT_TOKEN, 1)[1].lstrip("/") if BOT_TOKEN in raw else raw.lstrip("/")
             file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{rel}"
             logging.info(f"[Restore] دانلود از: {file_url}")
@@ -1291,7 +1292,6 @@ async def restore_database_finish(msg: types.Message):
                 os.remove(tmp_path)
         except Exception:
             pass
-        # اطمینان از برقراری اتصال حتی در صورت خطا
         try:
             cur.execute("SELECT 1")
         except Exception:
@@ -1829,6 +1829,28 @@ def split_file(path: str, limit: int) -> list:
     return parts
 
 
+
+
+def split_file(path: str, limit: int) -> list:
+    """تقسیم فایل به پارت‌های حداکثر `limit` بایت."""
+    import math
+    size = os.path.getsize(path)
+    n = max(1, math.ceil(size / limit))
+    part_size = math.ceil(size / n)
+    base = path + ".part"
+    parts = []
+    with open(path, "rb") as f:
+        for i in range(n):
+            chunk = f.read(part_size)
+            if not chunk:
+                break
+            pp = f"{base}{i+1:03d}"
+            with open(pp, "wb") as pf:
+                pf.write(chunk)
+            parts.append(pp)
+    return parts
+
+
 # ==========================================
 # =========== YOUTUBE DOWNLOADER ===========
 # ==========================================
@@ -1853,7 +1875,7 @@ async def youtube_get_url(msg: types.Message):
     if not re.match(yt_pattern, url):
         return await msg.answer("❌ لینک یوتیوب معتبر نیست. دوباره ارسال کنید.")
     if "list=" in url:
-        url = url.split("&")[0]  # فقط ویدیو، پلی‌لیست نه
+        url = url.split("&")[0]
 
     context_data[msg.from_user.id] = {"yt_url": url}
     states[msg.from_user.id] = "yt_quality"
@@ -1862,6 +1884,7 @@ async def youtube_get_url(msg: types.Message):
     try:
         import yt_dlp
 
+        # کلاینت‌هایی که فرمت‌های کامل (تا 4K) را برمی‌گردانند
         ydl_opts = {
             "quiet": True,
             "no_warnings": True,
@@ -1869,13 +1892,12 @@ async def youtube_get_url(msg: types.Message):
             "ignoreerrors": True,
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["android", "ios", "web", "tv", "web_safari", "web_embedded"],
+                    "player_client": ["tv", "web", "android_vr", "web_safari"],
                 }
             },
         }
 
         def get_info():
-            # process=True (پیش‌فرض) باشد تا فرمت‌ها پر شوند
             with yt_dlp.YoutubeDL(apply_cookies(ydl_opts)) as ydl:
                 return ydl.extract_info(url, download=False)
 
@@ -1885,19 +1907,22 @@ async def youtube_get_url(msg: types.Message):
         dur_s = f"{dur // 60}:{dur % 60:02d}" if dur else "نامشخص"
         context_data[msg.from_user.id]["title"] = title
 
-        # جمع‌آوری فرمت‌ها بر اساس format_id (منحصر‌به‌فرد)
-        vq = {}  # height -> {format_id, vbr}
+        # جمع‌آوری فرمت‌های ویدیویی با ارتفاع >= 360 (طبق درخواست)
+        vq = {}  # height -> format_id
         for f in info.get("formats", []):
             h = f.get("height")
             fid = f.get("format_id")
             if not h or not fid:
                 continue
-            if h < 144:
+            if h < 360:
                 continue
             if f.get("vcodec", "none") == "none":
-                continue  # فقط فرمت‌های دارای ویدیو
-            if h not in vq or (f.get("vbr", 0) or 0) > vq[h].get("vbr", 0):
-                vq[h] = {"format_id": fid, "vbr": f.get("vbr", 0) or 0}
+                continue
+            if h not in vq:
+                vq[h] = fid
+            else:
+                # اگر قبلاً بود، همان را نگه می‌داریم (اولین بهترین است)
+                pass
 
         heights = sorted(vq.keys())
         logging.info(f"[YT] {len(heights)} کیفیت پیدا شد: {heights}")
@@ -1905,13 +1930,12 @@ async def youtube_get_url(msg: types.Message):
         if not heights:
             return await wait.edit_text(
                 "❌ هیچ فرمت ویدیویی پیدا نشد.\n"
-                "ممکن است یوتیوب در IP دیتاسنتر محدود کرده باشد. کوکی (YT_COOKIES / cookies.txt) را بررسی کنید."
+                "یوتیوب در IP دیتاسنتر محدود کرده. کوکی معتبر (YT_COOKIES) لازم است."
             )
 
         kb = [[InlineKeyboardButton(text="🔄 رفرش", callback_data="ytdl_refresh")]]
         for h in heights:
-            fid = vq[h]["format_id"]
-            kb.append([InlineKeyboardButton(text=f"🎬 {h}p", callback_data=f"ytdl_video_{h}_{fid}")])
+            kb.append([InlineKeyboardButton(text=f"🎬 {h}p", callback_data=f"ytdl_video_{h}_{vq[h]}")])
         kb.append([
             InlineKeyboardButton(text="🎵 MP3 128", callback_data="ytdl_audio_128"),
             InlineKeyboardButton(text="🎵 MP3 320", callback_data="ytdl_audio_320"),
@@ -1920,7 +1944,7 @@ async def youtube_get_url(msg: types.Message):
         kb.append([InlineKeyboardButton(text="❌ لغو", callback_data="ytdl_cancel")])
 
         await wait.edit_text(
-            f"🎬 **{title}**\n⏱ {dur_s}\n\nکیفیت را انتخاب کنید (از ۱۴۴p تا {max(heights)}p):",
+            f"🎬 **{title}**\n⏱ {dur_s}\n\nکیفیت را انتخاب کنید (از ۳۶۰p تا {max(heights)}p):",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
             parse_mode="Markdown",
         )
