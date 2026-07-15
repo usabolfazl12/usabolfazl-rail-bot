@@ -237,6 +237,7 @@ def downloader_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🎬 دانلود یوتیوب")],
+            [KeyboardButton(text="📸 دانلود اینستاگرام")],
             [KeyboardButton(text="🎵 دانلود اسپاتیفای")],
             [KeyboardButton(text="🔎 جستجو در Deezer")],
             [KeyboardButton(text="🔎 جستجو در SoundCloud")],
@@ -1182,9 +1183,11 @@ async def restore_database_start(msg: types.Message):
         return await msg.answer("فقط ادمین می‌تواند ریستور کند.")
     states[msg.from_user.id] = "restore_db"
     await msg.answer(
-        "♻️ فایل دیتابیس (.db) را ارسال کنید تا جایگزین دیتابیس فعلی شود.\n\n"
+        "♻️ **ریستور دیتابیس**\n\n"
+        "فایل دیتابیس (.db) را ارسال کنید تا جایگزین دیتابیس فعلی شود.\n\n"
         "⚠️ توجه: یک بکاپ خودکار از دیتابیس فعلی گرفته و برایتان ارسال می‌شود.",
         reply_markup=back_kb(),
+        parse_mode="Markdown",
     )
 
 
@@ -1206,36 +1209,15 @@ async def restore_database_finish(msg: types.Message):
         )
 
     tmp_path = DB + ".incoming"
-    logging.warning("=== RESTORE HANDLER v10 (clean rebuilt) ===")
+    logging.warning("=== RESTORE HANDLER v11 ===")
     try:
-        # روش ۱: دانلود با aiogram (روی سرور محلی بهتر کار می‌کند)
-        downloaded = False
-        try:
-            await bot.download(doc.file_id, destination=tmp_path)
-            downloaded = True
-            logging.info("[Restore] bot.download موفق بود.")
-        except Exception as e1:
-            logging.warning(f"[Restore] bot.download شکست: {e1}")
+        # روش: دانلود مستقیم فایل با aiogram (در هر دو حالت سرور محلی/عادی کار می‌کند)
+        await bot.download(file=doc.file_id, destination=tmp_path)
+        sz = os.path.getsize(tmp_path) if os.path.exists(tmp_path) else 0
+        if sz == 0:
+            raise Exception("فایل خالی یا دانلود نشد.")
 
-        # روش ۲: ساخت URL از api.telegram.org (فایل روی سرورهای اصلی تلگرام است)
-        if not downloaded or not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
-            file_info = await bot.get_file(doc.file_id)
-            raw = (file_info.file_path or "").replace("\\", "/")
-            rel = raw.split(BOT_TOKEN, 1)[1].lstrip("/") if BOT_TOKEN in raw else raw.lstrip("/")
-            file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{rel}"
-            logging.info(f"[Restore] دانلود از: {file_url}")
-            async with aiohttp.ClientSession() as s:
-                async with s.get(file_url) as resp:
-                    if resp.status == 200:
-                        with open(tmp_path, "wb") as f:
-                            f.write(await resp.read())
-                    else:
-                        return await msg.answer(
-                            f"❌ خطا در دانلود فایل (HTTP {resp.status})", reply_markup=admin_kb()
-                        )
-
-        if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
-            return await msg.answer("❌ فایل دانلود نشد.", reply_markup=admin_kb())
+        logging.info(f"[Restore] فایل با موفقیت دانلود شد: {sz} بایت")
 
         # اعتبارسنجی: جدول memes باید وجود داشته باشد
         test_conn = sqlite3.connect(tmp_path)
@@ -2088,6 +2070,168 @@ async def youtube_download_callback(callback: types.CallbackQuery):
             else:
                 await callback.message.answer_video(video=inp, caption=f"🎬 {title}\n{label}", supports_streaming=True)
             await prog.delete()
+    except Exception as e:
+        await prog.edit_text(f"❌ خطا در دانلود:\n{str(e)[:300]}")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ==========================================
+# =========== INSTAGRAM DOWNLOADER ==========
+# ==========================================
+
+
+@dp.message(F.text == "📸 دانلود اینستاگرام")
+async def instagram_downloader_start(msg: types.Message):
+    if not is_admin(msg.from_user.id):
+        return await msg.answer("دسترسی ندارید!")
+    states[msg.from_user.id] = "insta_url"
+    await msg.answer(
+        "📸 **دانلود از اینستاگرام**\n\n"
+        "لینک پست، ریلز یا استوری اینستاگرام را ارسال کنید:\n\n"
+        "مثال:\n`https://www.instagram.com/p/...`",
+        reply_markup=back_kb(),
+        parse_mode="Markdown",
+    )
+
+
+@dp.message(F.text, lambda m: states.get(m.from_user.id) == "insta_url")
+async def instagram_get_url(msg: types.Message):
+    url = msg.text.strip()
+    if "instagram.com/" not in url:
+        return await msg.answer("❌ لینک اینستاگرام معتبر نیست. دوباره ارسال کنید.")
+    # حذف پارامترهای اضافی (مثل utm_source)
+    url = url.split("?")[0]
+
+    context_data[msg.from_user.id] = {"insta_url": url}
+    states[msg.from_user.id] = "insta_ready"
+    wait = await msg.answer("⏳ در حال دریافت اطلاعات...")
+
+    try:
+        import yt_dlp
+
+        ydl_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "extract_flat": False,
+            "ignoreerrors": True,
+        }
+
+        def get_info():
+            with yt_dlp.YoutubeDL(apply_cookies(ydl_opts)) as ydl:
+                return ydl.extract_info(url, download=False)
+
+        info = await asyncio.get_event_loop().run_in_executor(None, get_info)
+        title = info.get("title", "اینستاگرام") or "پست اینستاگرام"
+        context_data[msg.from_user.id]["title"] = title
+
+        # جمع‌آوری فرمت‌ها
+        fmt_video = None
+        fmt_audio = None
+        for f in info.get("formats", []):
+            if f.get("vcodec", "none") != "none" and f.get("acodec", "none") != "none":
+                # فرمت ترکیبی (صدا+تصویر) بهترین است
+                if not fmt_video or (f.get("tbr", 0) or 0) > (fmt_video.get("tbr", 0) or 0):
+                    fmt_video = f
+            elif f.get("vcodec", "none") != "none":
+                if not fmt_video or (f.get("tbr", 0) or 0) > (fmt_video.get("tbr", 0) or 0):
+                    fmt_video = f
+            elif f.get("acodec", "none") != "none":
+                if not fmt_audio or (f.get("tbr", 0) or 0) > (fmt_audio.get("tbr", 0) or 0):
+                    fmt_audio = f
+
+        # ساخت کیبورد
+        kb = []
+        if fmt_video:
+            fid = fmt_video.get("format_id")
+            label = "🎬 ویدیو"
+            # تشخیص کیفیت
+            height = fmt_video.get("height", "")
+
+            kb.append([InlineKeyboardButton(text=f"🎬 دانلود ویدیو ({height}p)", callback_data=f"insta_video_{fid}")])
+
+        # اگه ویدیو هست، نیازی به صدا جدا نیست (ترکیبی داریم)
+        kb.append([InlineKeyboardButton(text="❌ لغو", callback_data="insta_cancel")])
+
+        await wait.edit_text(
+            f"📸 **{title[:50]}**\n\nنوع دانلود را انتخاب کنید:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        await wait.edit_text(f"❌ خطا در دریافت اطلاعات:\n{str(e)[:300]}")
+        states.pop(msg.from_user.id, None)
+        context_data.pop(msg.from_user.id, None)
+
+
+@dp.callback_query(F.data.startswith("insta_"))
+async def instagram_download_callback(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("دسترسی ندارید", show_alert=True)
+    data = callback.data
+    uid = callback.from_user.id
+    if data == "insta_cancel":
+        states.pop(uid, None)
+        context_data.pop(uid, None)
+        await callback.message.edit_text("❌ لغو شد.")
+        return await callback.answer()
+
+    ud = context_data.get(uid, {})
+    url = ud.get("insta_url")
+    title = ud.get("title", "اینستاگرام")
+    if not url:
+        return await callback.answer("خطا: لینک پیدا نشد.", show_alert=True)
+
+    await callback.answer()
+    prog = await callback.message.edit_text("⏳ در حال آماده‌سازی...")
+    states.pop(uid, None)
+    context_data.pop(uid, None)
+
+    tmp = tempfile.mkdtemp()
+    try:
+        import yt_dlp
+
+        fid = data.replace("insta_video_", "")
+        opts = {
+            "format": f"{fid}+bestaudio/best" if fid else "bestvideo+bestaudio/best",
+            "outtmpl": os.path.join(tmp, "%(title)s.%(ext)s"),
+            "merge_output_format": "mp4",
+            "quiet": True,
+        }
+
+        def dl():
+            with yt_dlp.YoutubeDL(apply_cookies(opts)) as ydl:
+                ydl.download([url])
+
+        await prog.edit_text("⬇️ **در حال دانلود از اینستاگرام...**\n⏳ صبر کنید...", parse_mode="Markdown")
+        await asyncio.get_event_loop().run_in_executor(None, dl)
+
+        files = [str(p) for p in Path(tmp).glob("*") if p.is_file()]
+        if not files:
+            return await prog.edit_text("❌ فایلی دانلود نشد!")
+
+        fp = files[0]
+        sz = os.path.getsize(fp)
+
+        if sz > MAX_UPLOAD_SIZE:
+            # تقسیم به پارت
+            PART_LIMIT = 2 * 1024 * 1024 * 1024
+            if sz > PART_LIMIT:
+                await prog.edit_text("✅ دانلود کامل شد!\n📤 در حال تقسیم به پارت‌های ۲GB...")
+                part_paths = split_file(fp, PART_LIMIT)
+                for i, pp in enumerate(part_paths, 1):
+                    inp = FSInputFile(pp, filename=os.path.basename(pp))
+                    await callback.message.answer_video(video=inp, caption=f"📸 {title[:50]}\n📦 پارت {i}/{len(part_paths)}", supports_streaming=True)
+                    os.remove(pp)
+                await prog.delete()
+                return
+            else:
+                return await prog.edit_text(f"❌ حجم ({sz // (1024*1024)}MB) بیش از {MAX_UPLOAD_LABEL} است!")
+
+        await prog.edit_text("✅ دانلود کامل شد!\n📤 در حال آپلود...")
+        inp = FSInputFile(fp, filename=os.path.basename(fp))
+        await callback.message.answer_video(video=inp, caption=f"📸 {title[:50]}", supports_streaming=True)
+        await prog.delete()
     except Exception as e:
         await prog.edit_text(f"❌ خطا در دانلود:\n{str(e)[:300]}")
     finally:
