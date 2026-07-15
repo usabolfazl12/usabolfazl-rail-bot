@@ -1202,14 +1202,22 @@ async def restore_database_finish(msg: types.Message):
         )
 
     tmp_path = DB + ".incoming"
-    logging.warning("=== RESTORE HANDLER v6 ===")
+    logging.warning("=== RESTORE HANDLER v7 ===")
     try:
-        # وقتی سرور محلی (Local API) فعال است، فایل‌های دریافتی روی هارد
-        # خودِ سرور ذخیره می‌شوند و ربات (کانتینر جدا) به آن دسترسی ندارد.
-        # پس دانلود را مستقیم از سرور اصلی تلگرام انجام می‌دهیم (فایل روی
-        # سرورهای تلگرام است و با URL استاندارد قابل دریافت است).
+        # وقتی سرور محلی (Local API) فعال است، get_file مسیر مطلق روی هارد
+        # سرور را برمی‌گرداند (مثل /var/lib/telegram-bot-api/<token>/documents/x.db).
+        # تلگرام فایل را در سرورهای اصلی خودش نگه می‌دارد، پس ما فقط بخش
+        # نسبی (بعد از توکن) را جدا کرده و از api.telegram.org دانلود می‌کنیم.
         file_info = await bot.get_file(doc.file_id)
-        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path.lstrip('/')}"
+        raw = (file_info.file_path or "").replace("\\", "/")
+        # جدا کردن بخش نسبی: هرچه بعد از <token>/ باشد
+        if BOT_TOKEN in raw:
+            rel = raw.split(BOT_TOKEN, 1)[1].lstrip("/")
+        else:
+            # اگر توکن در مسیر نبود، فرض می‌کنیم خودِ raw نسبی است
+            rel = raw.lstrip("/")
+        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{rel}"
+        logging.info(f"[Restore] Downloading from: {file_url}")
         async with aiohttp.ClientSession() as s:
             async with s.get(file_url) as resp:
                 if resp.status == 200:
