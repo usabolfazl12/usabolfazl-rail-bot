@@ -44,7 +44,7 @@ OWNER_ID = int(os.getenv("OWNER_ID", "123456789"))
 # redeploy روی Railway دیتابیس پاک نمی‌شود.
 DB = os.getenv("DB_PATH", "bot_data.db")
 
-# ساخت پوشه‌ی مقصد در صورت نیاز (مثلاً /data)
+# ساخت پوشه‌ی مقصد در صورت نیاز (مثلاً /data یا /botdata)
 _db_dir = os.path.dirname(DB)
 if _db_dir:
     os.makedirs(_db_dir, exist_ok=True)
@@ -1202,17 +1202,23 @@ async def restore_database_finish(msg: types.Message):
         )
 
     tmp_path = DB + ".incoming"
-    logging.warning("=== RESTORE HANDLER v5 LOADED ===  using bot.download()")
+    logging.warning("=== RESTORE HANDLER v6 ===")
     try:
-        # دانلود مستقیم با aiogram — با سرور محلی (Local API) و سرور عادی هر دو سازگار است
-        # و نیازی به ساختن URL دستی ندارد (که روی Local API باعث 404 می‌شد)
-        try:
-            await bot.download(doc.file_id, destination=tmp_path)
-        except Exception as dl_err:
-            logging.error(f"[Restore] Download failed: {dl_err}")
-            return await msg.answer(f"❌ خطا در دانلود فایل: {dl_err}", reply_markup=admin_kb())
-
-        logging.info(f"[Restore] DB downloaded to: {tmp_path}")
+        # وقتی سرور محلی (Local API) فعال است، فایل‌های دریافتی روی هارد
+        # خودِ سرور ذخیره می‌شوند و ربات (کانتینر جدا) به آن دسترسی ندارد.
+        # پس دانلود را مستقیم از سرور اصلی تلگرام انجام می‌دهیم (فایل روی
+        # سرورهای تلگرام است و با URL استاندارد قابل دریافت است).
+        file_info = await bot.get_file(doc.file_id)
+        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path.lstrip('/')}"
+        async with aiohttp.ClientSession() as s:
+            async with s.get(file_url) as resp:
+                if resp.status == 200:
+                    with open(tmp_path, "wb") as f:
+                        f.write(await resp.read())
+                else:
+                    return await msg.answer(
+                        f"❌ خطا در دانلود فایل (HTTP {resp.status})", reply_markup=admin_kb()
+                    )
 
         test_conn = sqlite3.connect(tmp_path)
         try:
@@ -1694,7 +1700,12 @@ def make_progress_bar(percent: float, length: int = 20) -> str:
 # ========== COOKIE MANAGEMENT =============
 # ==========================================
 # مسیر فایل کوکی که yt-dlp استفاده می‌کند
-COOKIES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
+# مسیر فایل کوکی: اولویت با پوشه‌ی ولوم (همان‌جا که دیتابیس است)،
+# سپس فایل کنار کد. متغیر YT_COOKIES هم هنوز پشتیبانی می‌شود.
+_VOL_DIR = os.path.dirname(DB) or "/data"
+COOKIES_FILE = os.path.join(_VOL_DIR, "cookies.txt")
+if not os.path.exists(COOKIES_FILE):
+    COOKIES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
 
 
 def _prepare_cookies_file():
@@ -1725,6 +1736,9 @@ def apply_cookies(ydl_opts: dict) -> dict:
     # استفاده از فایل کوکی در صورت وجود
     if os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 0:
         ydl_opts["cookiefile"] = COOKIES_FILE
+        logging.info("یوتیوب: از فایل کوکی استفاده می‌شود.")
+    else:
+        logging.warning("یوتیوب: فایل کوکی یافت نشد! در صورت بلاک شدن توسط یوتیوب، متغیر YT_COOKIES را ست کنید.")
 
     # User-Agent واقعی تا درخواست شبیه مرورگر معمولی باشد
     ydl_opts.setdefault("http_headers", {})
