@@ -1188,6 +1188,8 @@ async def restore_database_start(msg: types.Message):
     )
 
 
+
+
 @dp.message(F.document, lambda m: states.get(m.from_user.id) == "restore_db")
 async def restore_database_finish(msg: types.Message):
     global db, cur
@@ -1202,49 +1204,53 @@ async def restore_database_finish(msg: types.Message):
         )
 
     tmp_path = DB + ".incoming"
-    logging.warning("=== RESTORE HANDLER v7 ===")
+    logging.warning("=== RESTORE HANDLER v9 (rebuilt) ===")
     try:
-        # وقتی سرور محلی (Local API) فعال است، get_file مسیر مطلق روی هارد
-        # سرور را برمی‌گرداند (مثل /var/lib/telegram-bot-api/<token>/documents/x.db).
-        # تلگرام فایل را در سرورهای اصلی خودش نگه می‌دارد، پس ما فقط بخش
-        # نسبی (بعد از توکن) را جدا کرده و از api.telegram.org دانلود می‌کنیم.
-        file_info = await bot.get_file(doc.file_id)
-        raw = (file_info.file_path or "").replace("\\", "/")
-        # جدا کردن بخش نسبی: هرچه بعد از <token>/ باشد
-        if BOT_TOKEN in raw:
-            rel = raw.split(BOT_TOKEN, 1)[1].lstrip("/")
-        else:
-            # اگر توکن در مسیر نبود، فرض می‌کنیم خودِ raw نسبی است
-            rel = raw.lstrip("/")
-        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{rel}"
-        logging.info(f"[Restore] Downloading from: {file_url}")
-        async with aiohttp.ClientSession() as s:
-            async with s.get(file_url) as resp:
-                if resp.status == 200:
-                    with open(tmp_path, "wb") as f:
-                        f.write(await resp.read())
-                else:
-                    return await msg.answer(
-                        f"❌ خطا در دانلود فایل (HTTP {resp.status})", reply_markup=admin_kb()
-                    )
+        # روش ۱: دانلود با aiogram (روی سرور محلی بهتر کار می‌کند)
+        downloaded = False
+        try:
+            await bot.download(doc.file_id, destination=tmp_path)
+            downloaded = True
+            logging.info("[Restore] bot.download موفق بود.")
+        except Exception as e1:
+            logging.warning(f"[Restore] bot.download شکست: {e1}")
 
+        # روش ۲: ساخت URL از api.telegram.org (فایل روی سرورهای اصلی تلگرام است)
+        if not downloaded or not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
+            file_info = await bot.get_file(doc.file_id)
+            raw = (file_info.file_path or "").replace("\\", "/")
+            # جدا کردن بخش نسبی: بعد از توکن
+            rel = raw.split(BOT_TOKEN, 1)[1].lstrip("/") if BOT_TOKEN in raw else raw.lstrip("/")
+            file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{rel}"
+            logging.info(f"[Restore] دانلود از: {file_url}")
+            async with aiohttp.ClientSession() as s:
+                async with s.get(file_url) as resp:
+                    if resp.status == 200:
+                        with open(tmp_path, "wb") as f:
+                            f.write(await resp.read())
+                    else:
+                        return await msg.answer(
+                            f"❌ خطا در دانلود فایل (HTTP {resp.status})", reply_markup=admin_kb()
+                        )
+
+        if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
+            return await msg.answer("❌ فایل دانلود نشد.", reply_markup=admin_kb())
+
+        # اعتبارسنجی: جدول memes باید وجود داشته باشد
         test_conn = sqlite3.connect(tmp_path)
         try:
-            names = {
-                r[0]
-                for r in test_conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                ).fetchall()
-            }
+            names = {r[0] for r in test_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
         finally:
             test_conn.close()
+
         if "memes" not in names:
             os.remove(tmp_path)
             return await msg.answer(
                 "❌ فایل معتبر نیست (جدول memes پیدا نشد).", reply_markup=admin_kb()
             )
 
-        # بکاپ خودکار از دیتابیس فعلی و ارسال برای ادمین
+        # بکاپ خودکار از دیتابیس فعلی
         ts = datetime.datetime.utcnow().strftime("%Y%m%d%H%M%S")
         auto_backup = f"pre_restore_{ts}.db"
         try:
@@ -1267,12 +1273,13 @@ async def restore_database_finish(msg: types.Message):
             except Exception:
                 pass
 
-        # بستن اتصال فعلی، جایگزینی فایل و اتصال مجدد
+        # جایگزینی فایل و اتصال مجدد
         db.close()
         shutil.move(tmp_path, DB)
         db = sqlite3.connect(DB, check_same_thread=False)
         cur = db.cursor()
         ensure_last_used_column()
+        ensure_schema_and_owner()
 
         await msg.answer(
             "✅ دیتابیس با موفقیت ریستور شد!", reply_markup=admin_kb()
@@ -1800,10 +1807,31 @@ async def back_to_admin_from_downloader(msg: types.Message):
     await msg.answer("برگشت به پنل ادمین", reply_markup=admin_kb())
 
 
+
+
+def split_file(path: str, limit: int) -> list:
+    """تقسیم فایل به پارت‌های حداکثر `limit` بایت. برمی‌گرداند لیست مسیرهای پارت."""
+    import math
+    size = os.path.getsize(path)
+    n = max(1, math.ceil(size / limit))
+    part_size = math.ceil(size / n)
+    base = path + ".part"
+    parts = []
+    with open(path, "rb") as f:
+        for i in range(n):
+            chunk = f.read(part_size)
+            if not chunk:
+                break
+            pp = f"{base}{i+1:03d}"
+            with open(pp, "wb") as pf:
+                pf.write(chunk)
+            parts.append(pp)
+    return parts
+
+
 # ==========================================
 # =========== YOUTUBE DOWNLOADER ===========
 # ==========================================
-
 
 
 @dp.message(F.text == "🎬 دانلود یوتیوب")
@@ -1838,14 +1866,16 @@ async def youtube_get_url(msg: types.Message):
             "quiet": True,
             "no_warnings": True,
             "extract_flat": False,
+            "ignoreerrors": True,
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["android", "ios", "web", "tv"],
+                    "player_client": ["android", "ios", "web", "tv", "web_safari", "web_embedded"],
                 }
             },
         }
 
         def get_info():
+            # process=True (پیش‌فرض) باشد تا فرمت‌ها پر شوند
             with yt_dlp.YoutubeDL(apply_cookies(ydl_opts)) as ydl:
                 return ydl.extract_info(url, download=False)
 
@@ -1855,21 +1885,33 @@ async def youtube_get_url(msg: types.Message):
         dur_s = f"{dur // 60}:{dur % 60:02d}" if dur else "نامشخص"
         context_data[msg.from_user.id]["title"] = title
 
-        # جمع‌آوری همه‌ی کیفیت‌های ویدیویی (صعودی، بدون تکرار)
-        vq = {}
+        # جمع‌آوری فرمت‌ها بر اساس format_id (منحصر‌به‌فرد)
+        vq = {}  # height -> {format_id, vbr}
         for f in info.get("formats", []):
             h = f.get("height")
-            if h and h >= 144 and f.get("vcodec", "none") != "none":
-                if h not in vq or (f.get("vbr", 0) or 0) > vq[h].get("vbr", 0):
-                    vq[h] = f
-        heights = sorted(vq.keys())
-        logging.info(f"[YT] {len(heights)} کیفیت: {heights}")
+            fid = f.get("format_id")
+            if not h or not fid:
+                continue
+            if h < 144:
+                continue
+            if f.get("vcodec", "none") == "none":
+                continue  # فقط فرمت‌های دارای ویدیو
+            if h not in vq or (f.get("vbr", 0) or 0) > vq[h].get("vbr", 0):
+                vq[h] = {"format_id": fid, "vbr": f.get("vbr", 0) or 0}
 
-        kb = [
-            [InlineKeyboardButton(text="🔄 رفرش", callback_data="ytdl_refresh")],
-        ]
+        heights = sorted(vq.keys())
+        logging.info(f"[YT] {len(heights)} کیفیت پیدا شد: {heights}")
+
+        if not heights:
+            return await wait.edit_text(
+                "❌ هیچ فرمت ویدیویی پیدا نشد.\n"
+                "ممکن است یوتیوب در IP دیتاسنتر محدود کرده باشد. کوکی (YT_COOKIES / cookies.txt) را بررسی کنید."
+            )
+
+        kb = [[InlineKeyboardButton(text="🔄 رفرش", callback_data="ytdl_refresh")]]
         for h in heights:
-            kb.append([InlineKeyboardButton(text=f"🎬 {h}p", callback_data=f"ytdl_video_{h}")])
+            fid = vq[h]["format_id"]
+            kb.append([InlineKeyboardButton(text=f"🎬 {h}p", callback_data=f"ytdl_video_{h}_{fid}")])
         kb.append([
             InlineKeyboardButton(text="🎵 MP3 128", callback_data="ytdl_audio_128"),
             InlineKeyboardButton(text="🎵 MP3 320", callback_data="ytdl_audio_320"),
@@ -1878,12 +1920,12 @@ async def youtube_get_url(msg: types.Message):
         kb.append([InlineKeyboardButton(text="❌ لغو", callback_data="ytdl_cancel")])
 
         await wait.edit_text(
-            f"🎬 **{title}**\n⏱ {dur_s}\n\nکیفیت را انتخاب کنید:",
+            f"🎬 **{title}**\n⏱ {dur_s}\n\nکیفیت را انتخاب کنید (از ۱۴۴p تا {max(heights)}p):",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
             parse_mode="Markdown",
         )
     except Exception as e:
-        await wait.edit_text(f"❌ خطا در دریافت اطلاعات:\n{str(e)[:200]}")
+        await wait.edit_text(f"❌ خطا در دریافت اطلاعات:\n{str(e)[:300]}")
         states.pop(msg.from_user.id, None)
         context_data.pop(msg.from_user.id, None)
 
@@ -1896,7 +1938,6 @@ async def yt_refresh(callback: types.CallbackQuery):
     saved = context_data.get(callback.from_user.id, {})
     if not saved.get("yt_url"):
         return await callback.message.edit_text("❌ لینک یافت نشد. دوباره شروع کنید.")
-    # فراخوانی مجدد هندلر اصلی با یک شیء پیام ساختگی
     class _M:
         text = saved["yt_url"]
         from_user = callback.from_user
@@ -1965,15 +2006,26 @@ async def youtube_download_callback(callback: types.CallbackQuery):
                 "progress_hooks": [hook],
             }
         else:
-            h = data.replace("ytdl_video_", "")
+            parts = data.replace("ytdl_video_", "").split("_")
+            h = parts[0]
+            fid = parts[1] if len(parts) > 1 else None
             label = f"🎬 {h}p"
-            opts = {
-                "format": f"bestvideo[height<={h}]+bestaudio/best",
-                "outtmpl": os.path.join(tmp, "%(title)s.%(ext)s"),
-                "merge_output_format": "mp4",
-                "quiet": True,
-                "progress_hooks": [hook],
-            }
+            if fid:
+                opts = {
+                    "format": f"{fid}+bestaudio/best",
+                    "outtmpl": os.path.join(tmp, "%(title)s.%(ext)s"),
+                    "merge_output_format": "mp4",
+                    "quiet": True,
+                    "progress_hooks": [hook],
+                }
+            else:
+                opts = {
+                    "format": f"bestvideo[height<={h}]+bestaudio/best",
+                    "outtmpl": os.path.join(tmp, "%(title)s.%(ext)s"),
+                    "merge_output_format": "mp4",
+                    "quiet": True,
+                    "progress_hooks": [hook],
+                }
 
         def dl():
             with yt_dlp.YoutubeDL(apply_cookies(opts)) as ydl:
@@ -1988,18 +2040,30 @@ async def youtube_download_callback(callback: types.CallbackQuery):
 
         fp = files[0]
         sz = os.path.getsize(fp)
-        if sz > MAX_UPLOAD_SIZE:
-            return await prog.edit_text(
-                f"❌ حجم ({sz // (1024*1024)}MB) بیش از {MAX_UPLOAD_LABEL} است!"
-            )
 
-        await prog.edit_text("✅ دانلود کامل شد!\n📤 در حال آپلود...")
-        inp = FSInputFile(fp, filename=os.path.basename(fp))
-        if is_audio:
-            await callback.message.answer_audio(audio=inp, title=title, caption=f"🎵 {title}\n{label}")
+        PART_LIMIT = 2 * 1024 * 1024 * 1024  # 2GB
+        if sz > PART_LIMIT:
+            await prog.edit_text("✅ دانلود کامل شد!\n📤 در حال تقسیم به پارت‌های ۲GB...")
+            part_paths = split_file(fp, PART_LIMIT)
+            total = len(part_paths)
+            for i, pp in enumerate(part_paths, 1):
+                inp = FSInputFile(pp, filename=os.path.basename(pp))
+                if is_audio:
+                    await callback.message.answer_audio(audio=inp, title=title, caption=f"🎵 {title}\n{label}\n📦 پارت {i}/{total}")
+                else:
+                    await callback.message.answer_video(video=inp, caption=f"🎬 {title}\n{label}\n📦 پارت {i}/{total}", supports_streaming=True)
+                os.remove(pp)
+            await prog.delete()
         else:
-            await callback.message.answer_video(video=inp, caption=f"🎬 {title}\n{label}", supports_streaming=True)
-        await prog.delete()
+            if sz > MAX_UPLOAD_SIZE:
+                return await prog.edit_text(f"❌ حجم ({sz // (1024*1024)}MB) بیش از {MAX_UPLOAD_LABEL} است!")
+            await prog.edit_text("✅ دانلود کامل شد!\n📤 در حال آپلود...")
+            inp = FSInputFile(fp, filename=os.path.basename(fp))
+            if is_audio:
+                await callback.message.answer_audio(audio=inp, title=title, caption=f"🎵 {title}\n{label}")
+            else:
+                await callback.message.answer_video(video=inp, caption=f"🎬 {title}\n{label}", supports_streaming=True)
+            await prog.delete()
     except Exception as e:
         await prog.edit_text(f"❌ خطا در دانلود:\n{str(e)[:300]}")
     finally:
