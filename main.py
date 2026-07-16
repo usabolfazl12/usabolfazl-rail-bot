@@ -1208,16 +1208,24 @@ async def restore_database_finish(msg: types.Message):
             "❌ فقط فایل با پسوند .db قبول می‌شود.", reply_markup=admin_kb()
         )
 
-    tmp_path = DB + ".incoming"
-    logging.warning("=== RESTORE HANDLER v11 ===")
+    logging.warning("=== RESTORE HANDLER v12 (Direct Telegram API) ===")
     try:
-        # روش: دانلود مستقیم فایل با aiogram (در هر دو حالت سرور محلی/عادی کار می‌کند)
-        await bot.download(file=doc.file_id, destination=tmp_path)
-        sz = os.path.getsize(tmp_path) if os.path.exists(tmp_path) else 0
-        if sz == 0:
-            raise Exception("فایل خالی یا دانلود نشد.")
+        # برای ریستور همیشه از سرور رسمی تلگرام دانلود می‌کنیم
+        file_info = await bot.get_file(doc.file_id)
+        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path.lstrip('/')}"
+        
+        logging.info(f"[Restore] دانلود مستقیم از: {file_url}")
+        async with aiohttp.ClientSession() as s:
+            async with s.get(file_url) as resp:
+                if resp.status == 200:
+                    with open(tmp_path, "wb") as f:
+                        f.write(await resp.read())
+                else:
+                    return await msg.answer(f"❌ خطا در دانلود فایل (HTTP {resp.status})", reply_markup=admin_kb())
 
-        logging.info(f"[Restore] فایل با موفقیت دانلود شد: {sz} بایت")
+        sz = os.path.getsize(tmp_path)
+        if sz == 0:
+            raise Exception("فایل خالی است.")
 
         # اعتبارسنجی: جدول memes باید وجود داشته باشد
         test_conn = sqlite3.connect(tmp_path)
@@ -2154,9 +2162,9 @@ async def instagram_get_url(msg: types.Message):
         kb.append([InlineKeyboardButton(text="❌ لغو", callback_data="insta_cancel")])
 
         await wait.edit_text(
-            f"📸 **{title[:50]}**\n\nنوع دانلود را انتخاب کنید:",
+            f"📸 <b>{title[:50]}</b>\n\nنوع دانلود را انتخاب کنید:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
     except Exception as e:
         await wait.edit_text(f"❌ خطا در دریافت اطلاعات:\n{str(e)[:300]}")
@@ -2178,7 +2186,8 @@ async def instagram_download_callback(callback: types.CallbackQuery):
 
     ud = context_data.get(uid, {})
     url = ud.get("insta_url")
-    title = ud.get("title", "اینستاگرام")
+    # تمیز کردن عنوان برای HTML
+    title = (ud.get("title", "اینستاگرام") or "پست اینستاگرام").replace("<", "&lt;").replace(">", "&gt;")
     if not url:
         return await callback.answer("خطا: لینک پیدا نشد.", show_alert=True)
 
@@ -2203,7 +2212,7 @@ async def instagram_download_callback(callback: types.CallbackQuery):
             with yt_dlp.YoutubeDL(apply_cookies(opts)) as ydl:
                 ydl.download([url])
 
-        await prog.edit_text("⬇️ **در حال دانلود از اینستاگرام...**\n⏳ صبر کنید...", parse_mode="Markdown")
+        await prog.edit_text("⬇️ <b>در حال دانلود از اینستاگرام...</b>\n⏳ صبر کنید...", parse_mode="HTML")
         await asyncio.get_event_loop().run_in_executor(None, dl)
 
         files = [str(p) for p in Path(tmp).glob("*") if p.is_file()]
@@ -2213,24 +2222,25 @@ async def instagram_download_callback(callback: types.CallbackQuery):
         fp = files[0]
         sz = os.path.getsize(fp)
 
-        if sz > MAX_UPLOAD_SIZE:
-            # تقسیم به پارت
-            PART_LIMIT = 2 * 1024 * 1024 * 1024
-            if sz > PART_LIMIT:
-                await prog.edit_text("✅ دانلود کامل شد!\n📤 در حال تقسیم به پارت‌های ۲GB...")
-                part_paths = split_file(fp, PART_LIMIT)
-                for i, pp in enumerate(part_paths, 1):
-                    inp = FSInputFile(pp, filename=os.path.basename(pp))
-                    await callback.message.answer_video(video=inp, caption=f"📸 {title[:50]}\n📦 پارت {i}/{len(part_paths)}", supports_streaming=True)
-                    os.remove(pp)
-                await prog.delete()
-                return
-            else:
-                return await prog.edit_text(f"❌ حجم ({sz // (1024*1024)}MB) بیش از {MAX_UPLOAD_LABEL} است!")
+        # تمیز کردن عنوان برای کپشن
+        caption_title = title[:100]
+
+        PART_LIMIT = 2 * 1024 * 1024 * 1024
+        if sz > PART_LIMIT:
+            await prog.edit_text("✅ دانلود کامل شد!\n📤 در حال تقسیم...")
+            part_paths = split_file(fp, PART_LIMIT)
+            for i, pp in enumerate(part_paths, 1):
+                inp = FSInputFile(pp, filename=os.path.basename(pp))
+                await callback.message.answer_video(video=inp, caption=f"📸 <b>{caption_title}</b>\n📦 پارت {i}/{len(part_paths)}", parse_mode="HTML", supports_streaming=True)
+                os.remove(pp)
+            await prog.delete()
+            return
+        elif sz > MAX_UPLOAD_SIZE:
+            return await prog.edit_text(f"❌ حجم بیش از {MAX_UPLOAD_LABEL} است!")
 
         await prog.edit_text("✅ دانلود کامل شد!\n📤 در حال آپلود...")
         inp = FSInputFile(fp, filename=os.path.basename(fp))
-        await callback.message.answer_video(video=inp, caption=f"📸 {title[:50]}", supports_streaming=True)
+        await callback.message.answer_video(video=inp, caption=f"📸 <b>{caption_title}</b>", parse_mode="HTML", supports_streaming=True)
         await prog.delete()
     except Exception as e:
         await prog.edit_text(f"❌ خطا در دانلود:\n{str(e)[:300]}")
