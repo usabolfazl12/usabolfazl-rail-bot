@@ -240,6 +240,7 @@ def downloader_kb():
             [KeyboardButton(text="📸 دانلود اینستاگرام")],
             [KeyboardButton(text="🎵 دانلود اسپاتیفای")],
             [KeyboardButton(text="🔎 جستجو در Deezer")],
+            [KeyboardButton(text="🔎 جستجو در Spotify")],
             [KeyboardButton(text="🔎 جستجو در SoundCloud")],
             [KeyboardButton(text="🔙 برگشت به ادمین")],
         ],
@@ -2487,6 +2488,138 @@ async def spotify_download_callback(callback: types.CallbackQuery):
 # ==========================================
 # ============ DEEZER SEARCH ===============
 # ==========================================
+
+
+@dp.message(F.text == "🔎 جستجو در Spotify")
+async def spotify_search_start(msg: types.Message):
+    if not is_admin(msg.from_user.id):
+        return await msg.answer("دسترسی ندارید!")
+    states[msg.from_user.id] = "spotify_search"
+    await msg.answer(
+        "🔎 **جستجو در Spotify**\n\nنام آهنگ یا هنرمند را وارد کنید:",
+        reply_markup=back_kb(),
+        parse_mode="Markdown",
+    )
+
+
+@dp.message(F.text, lambda m: states.get(m.from_user.id) == "spotify_search")
+async def spotify_do_search(msg: types.Message):
+    query = msg.text.strip()
+    if not query:
+        return await msg.answer("عبارت جستجو نمیتونه خالی باشه.")
+    states.pop(msg.from_user.id, None)
+    wait_msg = await msg.answer(f"🔍 در حال جستجوی `{query}` در Spotify...")
+    try:
+        import yt_dlp
+        ydl_opts = {"quiet": True, "no_warnings": True, "extract_flat": True}
+        loop = asyncio.get_event_loop()
+        def search():
+            with yt_dlp.YoutubeDL(apply_cookies(ydl_opts)) as ydl:
+                return ydl.extract_info(f"ytsearch10:{query} audio", download=False)
+        info = await loop.run_in_executor(None, search)
+        entries = info.get("entries") or []
+        if not entries:
+            return await wait_msg.edit_text("❌ نتیجهای پیدا نشد.")
+        kb_rows = []
+        results_text = "🎵 **نتایج جستجو در Spotify:**\n\n"
+        for i, e in enumerate(entries[:10], 1):
+            title = e.get("title", "نامشخص")
+            dur = e.get("duration", 0)
+            dur_s = f"{dur // 60}:{dur % 60:02d}" if dur else ""
+            url = e.get("webpage_url") or e.get("url") or ""
+            results_text += f"{i}. {title} ({dur_s})\n"
+            kb_rows.append([
+                InlineKeyboardButton(
+                    text=f"{i}. {title[:35]}",
+                    callback_data=f"sp_dl|{i}|{url}",
+                )
+            ])
+        kb_rows.append([InlineKeyboardButton(text="❌ بستن", callback_data="sp_close")])
+        await wait_msg.edit_text(
+            results_text,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows),
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        await wait_msg.edit_text(f"❌ خطا در جستجو:\n{str(e)[:200]}")
+
+
+@dp.callback_query(F.data == "sp_close")
+async def spotify_close(callback: types.CallbackQuery):
+    await callback.message.delete()
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data.startswith("sp_dl|"))
+async def spotify_select_track(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("دسترسی ندارید", show_alert=True)
+    parts = callback.data.split("|", 2)
+    if len(parts) < 3:
+        return await callback.answer("bad data", show_alert=True)
+    idx = parts[1]
+    url = parts[2]
+    context_data[callback.from_user.id] = {"spotify_url": url, "spotify_idx": idx}
+    await callback.answer()
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎵 128K MP3", callback_data=f"spdl_128")],
+        [InlineKeyboardButton(text="🎵 320K MP3", callback_data=f"spdl_320")],
+        [InlineKeyboardButton(text="🎼 FLAC", callback_data=f"spdl_flac")],
+        [InlineKeyboardButton(text="❌ لغو", callback_data="spdl_cancel")],
+    ])
+    await callback.message.edit_text("🎵 کیفیت مورد نظر را انتخاب کنید:", reply_markup=kb)
+
+
+@dp.callback_query(lambda c: c.data.startswith("spdl_"))
+async def spotify_download(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("دسترسی ندارید", show_alert=True)
+    data = callback.data
+    if data == "spdl_cancel":
+        await callback.message.edit_text("❌ لغو شد.")
+        return await callback.answer()
+    q = data.replace("spdl_", "")  # 128 / 320 / flac
+    ud = context_data.get(callback.from_user.id, {})
+    url = ud.get("spotify_url")
+    if not url:
+        return await callback.answer("لینک پیدا نشد.", show_alert=True)
+    await callback.answer()
+    prog = await callback.message.edit_text("⏳ در حال دانلود...")
+    context_data.pop(callback.from_user.id, None)
+    tmp = tempfile.mkdtemp()
+    try:
+        import yt_dlp
+        if q == "flac":
+            post = [{"key": "FFmpegExtractAudio", "preferredcodec": "flac"}]
+            label = "🎼 FLAC"
+        else:
+            post = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": q}]
+            label = f"🎵 MP3 {q}K"
+        opts = {
+            "format": "bestaudio/best",
+            "outtmpl": os.path.join(tmp, "%(title)s.%(ext)s"),
+            "postprocessors": post,
+            "quiet": True,
+        }
+        loop = asyncio.get_event_loop()
+        def dl():
+            with yt_dlp.YoutubeDL(apply_cookies(opts)) as ydl:
+                ydl.download([url])
+        await loop.run_in_executor(None, dl)
+        files = [str(p) for p in Path(tmp).glob("*") if p.is_file()]
+        if not files:
+            return await prog.edit_text("❌ فایلی دانلود نشد!")
+        fp = files[0]
+        sz = os.path.getsize(fp)
+        if sz > MAX_UPLOAD_SIZE:
+            return await prog.edit_text(f"❌ حجم بیش از {MAX_UPLOAD_LABEL}!")
+        inp = FSInputFile(fp, filename=os.path.basename(fp))
+        await callback.message.answer_audio(audio=inp, caption=f"🎵 Spotify\n{label}", title=url[:30])
+        await prog.delete()
+    except Exception as e:
+        await prog.edit_text(f"❌ خطا:\n{str(e)[:300]}")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 @dp.message(F.text == "🔎 جستجو در Deezer")
