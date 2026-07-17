@@ -1209,13 +1209,21 @@ async def restore_database_finish(msg: types.Message):
             "❌ فقط فایل با پسوند .db قبول می‌شود.", reply_markup=admin_kb()
         )
 
-    logging.warning("=== RESTORE HANDLER v12 (Direct Telegram API) ===")
+    tmp_path = DB + ".incoming"
+    logging.warning("=== RESTORE HANDLER v13 ===")
     try:
-        # برای ریستور همیشه از سرور رسمی تلگرام دانلود می‌کنیم
+        # برای ریستور از سرور رسمی تلگرام دانلود می‌کنیم.
+        # در حالت Local API، file_path یک مسیر مطلق روی هارد سرور است که
+        # حاوی BOT_TOKEN است. باید فقط بخش «نسبی» (بعد از توکن) را جدا کنیم.
         file_info = await bot.get_file(doc.file_id)
-        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path.lstrip('/')}"
-        
+        raw = (file_info.file_path or "").replace("\\", "/")
+        if BOT_TOKEN in raw:
+            rel = raw.split(BOT_TOKEN, 1)[1].lstrip("/")
+        else:
+            rel = raw.lstrip("/")
+        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{rel}"
         logging.info(f"[Restore] دانلود مستقیم از: {file_url}")
+
         async with aiohttp.ClientSession() as s:
             async with s.get(file_url) as resp:
                 if resp.status == 200:
