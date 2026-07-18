@@ -2374,6 +2374,7 @@ async def spotify_download(callback: types.CallbackQuery):
                 await prog.edit_text("⏳ spotdl ناموفق، تلاش با yt-dlp...")
 
         # روش دوم: yt-dlp
+        import yt_dlp
         if q == "flac":
             post = [{"key": "FFmpegExtractAudio", "preferredcodec": "flac"}]
             label = "🎼 FLAC"
