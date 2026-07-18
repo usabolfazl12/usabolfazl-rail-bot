@@ -238,7 +238,6 @@ def downloader_kb():
         keyboard=[
             [KeyboardButton(text="🎬 دانلود یوتیوب")],
             [KeyboardButton(text="📸 دانلود اینستاگرام")],
-            [KeyboardButton(text="🎵 دانلود اسپاتیفای")],
             [KeyboardButton(text="🔎 جستجو در Deezer")],
             [KeyboardButton(text="🔎 جستجو در Spotify")],
             [KeyboardButton(text="🔎 جستجو در SoundCloud")],
@@ -1210,69 +1209,70 @@ async def restore_database_finish(msg: types.Message):
         )
 
     tmp_path = DB + ".incoming"
-    logging.warning("=== RESTORE HANDLER v15 (3 fallback methods) ===")
+    logging.warning("=== RESTORE HANDLER v16 (correct relative path) ===")
     try:
+        # مرحله ۱: دریافت file_path از سرور
+        file_info = await bot.get_file(doc.file_id)
+        raw_path = (file_info.file_path or "").replace("\\", "/")
+        logging.info(f"[Restore] file_path اصلی: {raw_path}")
+
+        # استخراج مسیر نسبی: هر چی بعد از توکن هست
+        if BOT_TOKEN in raw_path:
+            rel_path = raw_path.split(BOT_TOKEN, 1)[1].lstrip("/")
+        else:
+            # اگه توکن نبود، دو بخش آخر رو بردار
+            parts = [p for p in raw_path.split("/") if p]
+            rel_path = "/".join(parts[-2:]) if len(parts) >= 2 else raw_path.lstrip("/")
+
+        logging.info(f"[Restore] مسیر نسبی استخراج‌شده: {rel_path}")
+
         sz = 0
-        last_err = None
-
-        # روش ۱: bot.download() - بهترین روش، با سرور محلی هم کار می‌کند
+        # روش اول: URL از api.telegram.org (همیشه معتبره چون فایل اصلی رو دانلود می‌کنه)
         try:
-            await bot.download(file=doc.file_id, destination=tmp_path)
-            sz = os.path.getsize(tmp_path) if os.path.exists(tmp_path) else 0
-            if sz > 0:
-                logging.info(f"[Restore] روش ۱ (bot.download): موفق - {sz} بایت")
-        except Exception as e1:
-            last_err = e1
-            logging.warning(f"[Restore] روش ۱ شکست: {e1}")
+            url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{rel_path}"
+            logging.info(f"[Restore] تلاش با: {url}")
+            async with aiohttp.ClientSession() as s:
+                async with s.get(url) as resp:
+                    if resp.status == 200:
+                        content = await resp.read()
+                        with open(tmp_path, "wb") as f:
+                            f.write(content)
+                        sz = os.path.getsize(tmp_path)
+                        logging.info(f"[Restore] موفق! {sz} بایت")
+            if sz == 0:
+                raise Exception("فایل خالی")
+        except Exception as e_telegram:
+            logging.warning(f"[Restore] api.telegram.org شکست: {e_telegram}")
 
-        # روش ۲: ساخت URL از TG_API_URL (سرور محلی) با file_path
+        # روش دوم: URL از سرور محلی (اگه TG_API_URL ست باشه)
+        if sz == 0 and LOCAL_API_URL:
+            try:
+                url = f"{LOCAL_API_URL.rstrip('/')}/file/bot{BOT_TOKEN}/{rel_path}"
+                logging.info(f"[Restore] تلاش سرور محلی: {url}")
+                async with aiohttp.ClientSession() as s:
+                    async with s.get(url) as resp:
+                        if resp.status == 200:
+                            content = await resp.read()
+                            with open(tmp_path, "wb") as f:
+                                f.write(content)
+                            sz = os.path.getsize(tmp_path)
+                            logging.info(f"[Restore] موفق از سرور محلی! {sz} بایت")
+            except Exception as e_local:
+                logging.warning(f"[Restore] سرور محلی شکست: {e_local}")
+
+        # روش سوم: bot.download (آخرین تلاش)
         if sz == 0:
             try:
-                file_info = await bot.get_file(doc.file_id)
-                fpath = file_info.file_path or ""
-                if LOCAL_API_URL and fpath:
-                    # مسیر روی هارد سرور محلی است؛ باید از طریق خود سرور فایل رو بگیریم
-                    url = f"{LOCAL_API_URL.rstrip('/')}/file/bot{BOT_TOKEN}/{fpath.lstrip('/')}"
-                    logging.info(f"[Restore] روش ۲: {url}")
-                    async with aiohttp.ClientSession() as s:
-                        async with s.get(url) as resp:
-                            if resp.status == 200:
-                                content = await resp.read()
-                                with open(tmp_path, "wb") as f:
-                                    f.write(content)
-                                if os.path.exists(tmp_path):
-                                    sz = os.path.getsize(tmp_path)
-                                    logging.info(f"[Restore] روش ۲ موفق: {sz} بایت")
-            except Exception as e2:
-                last_err = e2
-                logging.warning(f"[Restore] روش ۲ شکست: {e2}")
-
-        # روش ۳: URL از api.telegram.org رسمی
-        if sz == 0:
-            try:
-                file_info = await bot.get_file(doc.file_id)
-                fpath = file_info.file_path or ""
-                if fpath:
-                    url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{fpath.lstrip('/')}"
-                    logging.info(f"[Restore] روش ۳: {url}")
-                    async with aiohttp.ClientSession() as s:
-                        async with s.get(url) as resp:
-                            if resp.status == 200:
-                                content = await resp.read()
-                                with open(tmp_path, "wb") as f:
-                                    f.write(content)
-                                if os.path.exists(tmp_path):
-                                    sz = os.path.getsize(tmp_path)
-                                    logging.info(f"[Restore] روش ۳ موفق: {sz} بایت")
-            except Exception as e3:
-                last_err = e3
-                logging.warning(f"[Restore] روش ۳ شکست: {e3}")
+                await bot.download(file=doc.file_id, destination=tmp_path)
+                sz = os.path.getsize(tmp_path) if os.path.exists(tmp_path) else 0
+                if sz > 0:
+                    logging.info(f"[Restore] bot.download موفق: {sz} بایت")
+            except Exception as e_dl:
+                logging.warning(f"[Restore] bot.download شکست: {e_dl}")
 
         if sz == 0:
-            raise Exception(
-                "هیچ‌کدام از روش‌ها موفق نشد. "
-                f"TG_API_URL={LOCAL_API_URL or '(خاموش)'} | آخرین خطا: {last_err}"
-            )
+            err_msg = f"هیچ روشی موفق نشد. rel_path={rel_path}, TG_API_URL={'فعال' if LOCAL_API_URL else 'خاموش'}"
+            raise Exception(err_msg)
 
         logging.info(f"[Restore] فایل دانلود شد: {sz} بایت")
 
