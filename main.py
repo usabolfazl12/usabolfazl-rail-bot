@@ -1260,16 +1260,6 @@ async def restore_database_finish(msg: types.Message):
             except Exception as e_local:
                 logging.warning(f"[Restore] سرور محلی شکست: {e_local}")
 
-        # روش سوم: bot.download (آخرین تلاش)
-        if sz == 0:
-            try:
-                await bot.download(file=doc.file_id, destination=tmp_path)
-                sz = os.path.getsize(tmp_path) if os.path.exists(tmp_path) else 0
-                if sz > 0:
-                    logging.info(f"[Restore] bot.download موفق: {sz} بایت")
-            except Exception as e_dl:
-                logging.warning(f"[Restore] bot.download شکست: {e_dl}")
-
         if sz == 0:
             err_msg = f"هیچ روشی موفق نشد. rel_path={rel_path}, TG_API_URL={'فعال' if LOCAL_API_URL else 'خاموش'}"
             raise Exception(err_msg)
