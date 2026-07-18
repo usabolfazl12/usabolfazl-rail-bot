@@ -1210,16 +1210,71 @@ async def restore_database_finish(msg: types.Message):
         )
 
     tmp_path = DB + ".incoming"
-    logging.warning("=== RESTORE HANDLER v14 (bot.download only) ===")
+    logging.warning("=== RESTORE HANDLER v15 (3 fallback methods) ===")
     try:
-        # بهترین روش: bot.download() هم روی سرور محلی و هم روی سرور رسمی کار می‌کنه.
-        # وقتی سرور محلی فعال باشد، aiogram به صورت خودکار از سرور Bot API محلی استفاده می‌کند.
-        await bot.download(file=doc.file_id, destination=tmp_path)
-        sz = os.path.getsize(tmp_path) if os.path.exists(tmp_path) else 0
-        if sz == 0:
-            raise Exception("فایل خالی یا دانلود نشد. در حالت Local API فایل از سرور Bot API محلی در دسترس نیست.")
+        sz = 0
+        last_err = None
 
-        logging.info(f"[Restore] فایل با موفقیت دانلود شد: {sz} بایت")
+        # روش ۱: bot.download() - بهترین روش، با سرور محلی هم کار می‌کند
+        try:
+            await bot.download(file=doc.file_id, destination=tmp_path)
+            sz = os.path.getsize(tmp_path) if os.path.exists(tmp_path) else 0
+            if sz > 0:
+                logging.info(f"[Restore] روش ۱ (bot.download): موفق - {sz} بایت")
+        except Exception as e1:
+            last_err = e1
+            logging.warning(f"[Restore] روش ۱ شکست: {e1}")
+
+        # روش ۲: ساخت URL از TG_API_URL (سرور محلی) با file_path
+        if sz == 0:
+            try:
+                file_info = await bot.get_file(doc.file_id)
+                fpath = file_info.file_path or ""
+                if LOCAL_API_URL and fpath:
+                    # مسیر روی هارد سرور محلی است؛ باید از طریق خود سرور فایل رو بگیریم
+                    url = f"{LOCAL_API_URL.rstrip('/')}/file/bot{BOT_TOKEN}/{fpath.lstrip('/')}"
+                    logging.info(f"[Restore] روش ۲: {url}")
+                    async with aiohttp.ClientSession() as s:
+                        async with s.get(url) as resp:
+                            if resp.status == 200:
+                                content = await resp.read()
+                                with open(tmp_path, "wb") as f:
+                                    f.write(content)
+                                if os.path.exists(tmp_path):
+                                    sz = os.path.getsize(tmp_path)
+                                    logging.info(f"[Restore] روش ۲ موفق: {sz} بایت")
+            except Exception as e2:
+                last_err = e2
+                logging.warning(f"[Restore] روش ۲ شکست: {e2}")
+
+        # روش ۳: URL از api.telegram.org رسمی
+        if sz == 0:
+            try:
+                file_info = await bot.get_file(doc.file_id)
+                fpath = file_info.file_path or ""
+                if fpath:
+                    url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{fpath.lstrip('/')}"
+                    logging.info(f"[Restore] روش ۳: {url}")
+                    async with aiohttp.ClientSession() as s:
+                        async with s.get(url) as resp:
+                            if resp.status == 200:
+                                content = await resp.read()
+                                with open(tmp_path, "wb") as f:
+                                    f.write(content)
+                                if os.path.exists(tmp_path):
+                                    sz = os.path.getsize(tmp_path)
+                                    logging.info(f"[Restore] روش ۳ موفق: {sz} بایت")
+            except Exception as e3:
+                last_err = e3
+                logging.warning(f"[Restore] روش ۳ شکست: {e3}")
+
+        if sz == 0:
+            raise Exception(
+                "هیچ‌کدام از روش‌ها موفق نشد. "
+                f"TG_API_URL={LOCAL_API_URL or '(خاموش)'} | آخرین خطا: {last_err}"
+            )
+
+        logging.info(f"[Restore] فایل دانلود شد: {sz} بایت")
 
         # اعتبارسنجی: جدول memes باید وجود داشته باشد
         test_conn = sqlite3.connect(tmp_path)
@@ -2240,242 +2295,6 @@ async def instagram_download_callback(callback: types.CallbackQuery):
         await prog.edit_text(f"❌ خطا در دانلود:\n{str(e)[:300]}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-
-
-# ==========================================
-# =========== SPOTIFY DOWNLOADER ===========
-# ==========================================
-
-
-@dp.message(F.text == "🎵 دانلود اسپاتیفای")
-async def spotify_downloader_start(msg: types.Message):
-    if not is_admin(msg.from_user.id):
-        return await msg.answer("دسترسی ندارید!")
-    states[msg.from_user.id] = "spotify_url"
-    await msg.answer(
-        "🎵 **دانلود از اسپاتیفای**\n\n"
-        "لینک آهنگ یا پلی‌لیست اسپاتیفای را ارسال کنید:\n\n"
-        "مثال:\n`https://open.spotify.com/track/...`",
-        reply_markup=back_kb(),
-        parse_mode="Markdown",
-    )
-
-
-@dp.message(F.text, lambda m: states.get(m.from_user.id) == "spotify_url")
-async def spotify_get_url(msg: types.Message):
-    url = msg.text.strip()
-
-    spotify_pattern = r"https?://open\.spotify\.com/(track|album|playlist)/.+"
-    if not re.match(spotify_pattern, url):
-        return await msg.answer(
-            "❌ لینک اسپاتیفای معتبر نیست.\nمثال: https://open.spotify.com/track/..."
-        )
-
-    context_data[msg.from_user.id] = {"spotify_url": url}
-    states[msg.from_user.id] = "spotify_quality"
-
-    # نمایش انتخاب کیفیت
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🎵 128K MP3", callback_data="spdl_128")],
-            [
-                InlineKeyboardButton(
-                    text="🎵 320K MP3 (بهترین)", callback_data="spdl_320"
-                )
-            ],
-            [InlineKeyboardButton(text="🎼 FLAC (بی‌ضرر)", callback_data="spdl_flac")],
-            [InlineKeyboardButton(text="❌ لغو", callback_data="spdl_cancel")],
-        ]
-    )
-
-    await msg.answer("🎵 کیفیت دانلود را انتخاب کنید:", reply_markup=kb)
-
-
-@dp.callback_query(F.data.startswith("spdl_"))
-async def spotify_download_callback(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        return await callback.answer("دسترسی ندارید", show_alert=True)
-
-    data = callback.data
-    user_id = callback.from_user.id
-
-    if data == "spdl_cancel":
-        states.pop(user_id, None)
-        context_data.pop(user_id, None)
-        await callback.message.edit_text("❌ دانلود لغو شد.")
-        return await callback.answer()
-
-    user_data = context_data.get(user_id, {})
-    url = user_data.get("spotify_url")
-
-    if not url:
-        await callback.answer("خطا: لینک پیدا نشد.", show_alert=True)
-        return
-
-    await callback.answer()
-
-    quality_map = {
-        "spdl_128": ("128", "MP3 128K"),
-        "spdl_320": ("320", "MP3 320K"),
-        "spdl_flac": ("flac", "FLAC"),
-    }
-
-    quality_val, quality_label = quality_map.get(data, ("320", "MP3 320K"))
-
-    states.pop(user_id, None)
-    context_data.pop(user_id, None)
-
-    progress_msg = await callback.message.edit_text(
-        f"⏳ در حال دانلود {quality_label}...\n\n{make_progress_bar(0)}"
-    )
-
-    tmp_dir = tempfile.mkdtemp()
-
-    try:
-        loop = asyncio.get_event_loop()
-
-        await update_progress_message(
-            progress_msg,
-            f"⬇️ **دانلود {quality_label}**\n\n"
-            f"{make_progress_bar(10)}\n\n"
-            f"⏳ در حال دریافت اطلاعات از اسپاتیفای...",
-        )
-
-        def do_spotdl():
-            """دانلود با spotdl"""
-            import subprocess
-            import sys
-
-            if quality_val == "flac":
-                format_arg = "flac"
-                bitrate_arg = "flac"
-            else:
-                format_arg = "mp3"
-                bitrate_arg = quality_val + "k"
-
-            cmd = [
-                sys.executable,
-                "-m",
-                "spotdl",
-                url,
-                "--output",
-                tmp_dir,
-                "--format",
-                format_arg,
-                "--bitrate",
-                bitrate_arg,
-                "--no-cache",
-            ]
-
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-
-            return result.returncode, result.stdout, result.stderr
-
-        await update_progress_message(
-            progress_msg,
-            f"⬇️ **دانلود {quality_label}**\n\n"
-            f"{make_progress_bar(30)}\n\n"
-            f"⏳ در حال دانلود...",
-        )
-
-        returncode, stdout, stderr = await loop.run_in_executor(None, do_spotdl)
-
-        await update_progress_message(
-            progress_msg,
-            f"⬇️ **دانلود {quality_label}**\n\n"
-            f"{make_progress_bar(90)}\n\n"
-            f"📤 در حال آپلود...",
-        )
-
-        # پیدا کردن فایل‌های دانلود شده
-        extensions = ["*.mp3", "*.flac", "*.m4a", "*.ogg", "*.wav"]
-        downloaded_files = []
-        for ext in extensions:
-            downloaded_files.extend(Path(tmp_dir).glob(ext))
-
-        # اگر spotdl چیزی نگرفت، fallback به yt-dlp با جستجوی نام آهنگ
-        if not downloaded_files:
-            await update_progress_message(
-                progress_msg,
-                f"⬇️ **دانلود {quality_label}**\n\n"
-                f"{make_progress_bar(60)}\n\n"
-                f"⏳ تلاش با روش جایگزین...",
-            )
-
-            def do_fallback():
-                import yt_dlp
-
-                # نام آهنگ را از متادیتای اسپاتیفای می‌گیریم
-                meta_opts = {"quiet": True, "no_warnings": True}
-                query = url
-                try:
-                    with yt_dlp.YoutubeDL(meta_opts) as ydl:
-                        meta = ydl.extract_info(url, download=False)
-                        t = meta.get("title") or meta.get("track") or ""
-                        a = meta.get("artist") or meta.get("uploader") or ""
-                        if t:
-                            query = f"{t} {a}".strip()
-                except Exception:
-                    pass
-
-                if quality_val == "flac":
-                    pp = [{"key": "FFmpegExtractAudio", "preferredcodec": "flac"}]
-                else:
-                    pp = [
-                        {
-                            "key": "FFmpegExtractAudio",
-                            "preferredcodec": "mp3",
-                            "preferredquality": quality_val,
-                        }
-                    ]
-                fb_opts = {
-                    "format": "bestaudio/best",
-                    "outtmpl": os.path.join(tmp_dir, "%(title)s.%(ext)s"),
-                    "postprocessors": pp,
-                    "quiet": True,
-                    "default_search": "ytsearch1",
-                }
-                with yt_dlp.YoutubeDL(apply_cookies(fb_opts)) as ydl:
-                    ydl.download([f"ytsearch1:{query}"])
-
-            await loop.run_in_executor(None, do_fallback)
-            for ext in extensions:
-                downloaded_files.extend(Path(tmp_dir).glob(ext))
-
-        if not downloaded_files:
-            await progress_msg.edit_text(
-                f"❌ فایلی دانلود نشد!\n\nخطا:\n{stderr[:300] if stderr else 'نامشخص'}"
-            )
-            return
-
-        sent_count = 0
-        for file_path in downloaded_files:
-            file_size = os.path.getsize(str(file_path))
-
-            if file_size > MAX_UPLOAD_SIZE:
-                await callback.message.answer(
-                    f"⚠️ فایل `{file_path.name}` حجم بیش از {MAX_UPLOAD_LABEL} دارد و قابل ارسال نیست."
-                )
-                continue
-
-            input_file = FSInputFile(str(file_path), filename=file_path.name)
-            await callback.message.answer_audio(
-                audio=input_file,
-                caption=f"🎵 {file_path.stem}\n🎼 کیفیت: {quality_label}",
-            )
-            sent_count += 1
-
-        if sent_count > 0:
-            await progress_msg.edit_text(f"✅ {sent_count} فایل با موفقیت ارسال شد!")
-        else:
-            await progress_msg.edit_text("❌ هیچ فایلی ارسال نشد!")
-
-    except asyncio.TimeoutError:
-        await progress_msg.edit_text("❌ زمان دانلود به پایان رسید!")
-    except Exception as e:
-        await progress_msg.edit_text(f"❌ خطا در دانلود اسپاتیفای:\n{str(e)[:300]}")
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 # ==========================================
