@@ -189,7 +189,7 @@ def admin_kb():
                 KeyboardButton(text="🗂 مدیریت میم‌ها"),
             ],
             [KeyboardButton(text="🗑 حذف میم"), KeyboardButton(text="📦 بکاپ دیتابیس")],
-            [KeyboardButton(text="♻️ ریستور دیتابیس")],
+            [KeyboardButton(text="🌐 دیتاسنتر")],
             [
                 KeyboardButton(text="📋 لیست کاربران"),
                 KeyboardButton(text="📋 لیست ادمین‌ها"),
@@ -1178,112 +1178,176 @@ async def backup_database(msg: types.Message):
 
 # ================= ریستور دیتابیس =================
 @dp.message(F.text == "♻️ ریستور دیتابیس")
-async def restore_database_start(msg: types.Message):
+# ================= دیتاسنتر (فیلهات و لینک مستقیم) =================
+@dp.message(F.text == "🌐 دیتاسنتر")
+async def datacenter_menu(msg: types.Message):
     if not is_admin(msg.from_user.id):
-        return await msg.answer("فقط ادمین می‌تواند ریستور کند.")
-    states[msg.from_user.id] = "restore_db"
+        return await msg.answer("دسترسی ندارید!")
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📤 فایل بفرست → لینک مستقیم بگیر", callback_data="dc_upload")],
+            [InlineKeyboardButton(text="📥 لینک مستقیم بده → فایل بگیر", callback_data="dc_download")],
+            [InlineKeyboardButton(text="🔙 بستن", callback_data="dc_close")],
+        ]
+    )
     await msg.answer(
-        "♻️ **ریستور دیتابیس**\n\n"
-        "فایل دیتابیس (.db) را ارسال کنید تا جایگزین دیتابیس فعلی شود.\n\n"
-        "⚠️ توجه: یک بکاپ خودکار از دیتابیس فعلی گرفته و برایتان ارسال می‌شود.",
-        reply_markup=back_kb(),
+        "🌐 **دیتاسنتر**\n\n"
+        "دو حالت داری:\n\n"
+        "**1️⃣ آپلود**: فایل بفرست، ربات لینک مستقیم دانلود (سرور محلی یا سرویس عمومی) رو می‌فرسته.\n"
+        "**2️⃣ دانلود**: روی 'لینک بده → فایل بگیر' بزن و لینک مستقیم رو بفرست، ربات فایل رو می‌گیره و برات می‌فرسته.",
+        reply_markup=kb,
         parse_mode="Markdown",
     )
 
 
+@dp.callback_query(F.data == "dc_close")
+async def dc_close(callback: types.CallbackQuery):
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.answer()
 
 
+@dp.callback_query(F.data == "dc_upload")
+async def dc_upload_start(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("دسترسی ندارید", show_alert=True)
+    states[callback.from_user.id] = "dc_upload"
+    await callback.message.edit_text(
+        "📤 **حالت آپلود**\n\n"
+        "فایل مورد نظر را ارسال کن. ربات لینک مستقیم دانلودش رو (که می‌تونی چند بار استفاده کنی) برات می‌فرسته.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 بازگشت", callback_data="dc_back")]
+            ]
+        ),
+        parse_mode="Markdown",
+    )
+    await callback.answer()
 
 
-@dp.message(F.document, lambda m: states.get(m.from_user.id) == "restore_db")
-async def restore_database_finish(msg: types.Message):
-    global db, cur
+@dp.callback_query(F.data == "dc_download")
+async def dc_download_start(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("دسترسی ندارید", show_alert=True)
+    states[callback.from_user.id] = "dc_download"
+    await callback.message.edit_text(
+        "📥 **حالت دانلود از لینک**\n\n"
+        "لینک مستقیم فایل را بفرست (مثلاً `https://example.com/file.zip`).\n"
+        "ربات فایل را از اون آدرس می‌گیره و برایت ارسال می‌کنه.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 بازگشت", callback_data="dc_back")]
+            ]
+        ),
+        parse_mode="Markdown",
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "dc_back")
+async def dc_back(callback: types.CallbackQuery):
+    states.pop(callback.from_user.id, None)
+    await datacenter_menu(callback.message)
+    await callback.answer()
+
+
+# 📤 دریافت فایل → ساخت لینک مستقیم
+@dp.message(F.document, lambda m: states.get(m.from_user.id) == "dc_upload")
+async def dc_upload_receive(msg: types.Message):
     if not is_admin(msg.from_user.id):
         return
     states.pop(msg.from_user.id, None)
-
     doc = msg.document
-    if not doc.file_name.lower().endswith(".db"):
-        return await msg.answer(
-            "❌ فقط فایل با پسوند .db قبول می‌شود.", reply_markup=admin_kb()
-        )
-
-    tmp_path = DB + ".incoming"
-    logging.warning("=== RESTORE HANDLER v17 (bot.download) ===")
+    # گرفتن file_info برای ساخت URL
     try:
-        # روش واحد و مطمئن: bot.download خودش تشخیص میده از کدوم سرور فایل رو بگیره
-        # (چه سرور محلی فعال باشه چه نباشه)
-        await bot.download(file=doc.file_id, destination=tmp_path)
-        sz = os.path.getsize(tmp_path) if os.path.exists(tmp_path) else 0
-        if sz == 0:
-            raise Exception("فایل خالی دانلود شد")
-        logging.info(f"[Restore] فایل با bot.download دانلود شد: {sz} بایت")
-
-        logging.info(f"[Restore] فایل دانلود شد: {sz} بایت")
-
-        # اعتبارسنجی: جدول memes باید وجود داشته باشد
-        test_conn = sqlite3.connect(tmp_path)
-        try:
-            names = {r[0] for r in test_conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-        finally:
-            test_conn.close()
-
-        if "memes" not in names:
-            os.remove(tmp_path)
-            return await msg.answer(
-                "❌ فایل معتبر نیست (جدول memes پیدا نشد).", reply_markup=admin_kb()
-            )
-
-        # بکاپ خودکار از دیتابیس فعلی
-        ts = datetime.datetime.utcnow().strftime("%Y%m%d%H%M%S")
-        auto_backup = f"pre_restore_{ts}.db"
-        try:
-            db.commit()
-        except Exception:
-            pass
-        bkp_conn = sqlite3.connect(auto_backup)
-        with bkp_conn:
-            db.backup(bkp_conn)
-        bkp_conn.close()
-        try:
-            await bot.send_document(
-                chat_id=msg.chat.id,
-                document=FSInputFile(auto_backup),
-                caption=f"🛟 بکاپ خودکار قبل از ریستور ({ts})",
-            )
-        finally:
-            try:
-                os.remove(auto_backup)
-            except Exception:
-                pass
-
-        # جایگزینی فایل و اتصال مجدد
-        db.close()
-        shutil.move(tmp_path, DB)
-        db = sqlite3.connect(DB, check_same_thread=False)
-        cur = db.cursor()
-        ensure_last_used_column()
-        ensure_schema_and_owner()
-
-        await msg.answer(
-            "✅ دیتابیس با موفقیت ریستور شد!", reply_markup=admin_kb()
-        )
+        file_info = await bot.get_file(doc.file_id)
     except Exception as e:
-        logging.exception("restore error")
+        logging.exception("get_file error")
+        return await msg.answer(f"❌ خطا در دریافت اطلاعات فایل: {e}", reply_markup=admin_kb())
+
+    raw_path = (file_info.file_path or "").replace("\\", "/")
+    if not raw_path:
+        return await msg.answer("❌ file_path خالی برگشت.", reply_markup=admin_kb())
+
+    # ساخت لینک از سرور محلی (اگه فعال باشه) یا عمومی تلگرام
+    if BOT_TOKEN in raw_path:
+        rel_path = raw_path.split(BOT_TOKEN, 1)[1].lstrip("/")
+    else:
+        parts = [p for p in raw_path.split("/") if p]
+        rel_path = "/".join(parts[-2:]) if len(parts) >= 2 else raw_path.lstrip("/")
+
+    if LOCAL_API_URL:
+        direct = f"{LOCAL_API_URL.rstrip('/')}/file/bot{BOT_TOKEN}/{rel_path}"
+        kind = "🟢 سرور محلی (Local Bot API)"
+    else:
+        direct = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{rel_path}"
+        kind = "🍎 سرور عمومی تلگرام"
+
+    sz = (doc.file_size or 0) / (1024 * 1024)
+    text = (
+        f"✅ **لینک مستقیم فایل:**\n\n"
+        f"📄 نام: `{doc.file_name}`\n"
+        f"📦 حجم: `{sz:.2f} MB`\n"
+        f"🔗 لینک: {direct}\n\n"
+        f"(**سرویس:** {kind})\n\n"
+        f"⚠️ این لینک رو عمومی نکن — مستقیم به حساب رباتت متصله."
+    )
+    await msg.answer(text, parse_mode="Markdown", reply_markup=admin_kb())
+
+
+# 📥 دریافت لینک → دانلود فایل و ارسال
+@dp.message(F.text, lambda m: states.get(m.from_user.id) == "dc_download")
+async def dc_download_url(msg: types.Message):
+    if not is_admin(msg.from_user.id):
+        return
+    url = msg.text.strip()
+    states.pop(msg.from_user.id, None)
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return await msg.answer("❌ باید یه لینک http/https معتبر باشه.", reply_markup=admin_kb())
+
+    wait = await msg.answer("⏳ در حال دانلود...", reply_markup=admin_kb())
+    tmp = tempfile.mkdtemp()
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url) as resp:
+                if resp.status != 200:
+                    return await wait.edit_text(f"❌ خطای HTTP {resp.status}")
+                # سعی می‌کنیم نام فایل رو از header به‌دست بیاریم
+                fname = None
+                cd = resp.headers.get("Content-Disposition", "")
+                if "filename=" in cd:
+                    fname = cd.split("filename=", 1)[1].strip('"').strip("'").split(";")[0]
+                if not fname:
+                    fname = url.split("/")[-1].split("?")[0] or "downloaded_file"
+
+                # از آخر URL حدس می‌زنیم پسوند
+                ext = os.path.splitext(fname)[1] or ""
+                fp = os.path.join(tmp, fname if fname else "file" + ext)
+                with open(fp, "wb") as f:
+                    while True:
+                        chunk = await resp.content.read(64 * 1024)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+        sz = os.path.getsize(fp)
+        if sz <= 0:
+            return await wait.edit_text("❌ فایل خالی برگشت.", reply_markup=admin_kb())
+        if sz > MAX_UPLOAD_SIZE:
+            return await wait.edit_text(
+                f"❌ حجم فایل {sz/1024/1024:.1f}MB بیش از سقف {MAX_UPLOAD_LABEL} هست!", reply_markup=admin_kb()
+            )
+        await msg.answer_document(document=FSInputFile(fp, filename=os.path.basename(fp)), caption=f"📥 فایل دانلودی از:\n{url[:200]}")
+        await wait.delete()
+    except Exception as e:
+        logging.exception("dc_download error")
         try:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
+            await wait.edit_text(f"❌ خطا در دانلود:\n{e}", reply_markup=admin_kb())
         except Exception:
             pass
-        try:
-            cur.execute("SELECT 1")
-        except Exception:
-            db = sqlite3.connect(DB, check_same_thread=False)
-            cur = db.cursor()
-        await msg.answer(
-            f"❌ خطا در ریستور دیتابیس: {e}", reply_markup=admin_kb()
-        )
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ================= افزودن میم (اسم اجباری، تگ اختیاری، ترتیب: اسم -> تگ -> فایل) =================
