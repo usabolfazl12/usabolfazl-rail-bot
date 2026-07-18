@@ -1209,60 +1209,15 @@ async def restore_database_finish(msg: types.Message):
         )
 
     tmp_path = DB + ".incoming"
-    logging.warning("=== RESTORE HANDLER v16 (correct relative path) ===")
+    logging.warning("=== RESTORE HANDLER v17 (bot.download) ===")
     try:
-        # مرحله ۱: دریافت file_path از سرور
-        file_info = await bot.get_file(doc.file_id)
-        raw_path = (file_info.file_path or "").replace("\\", "/")
-        logging.info(f"[Restore] file_path اصلی: {raw_path}")
-
-        # استخراج مسیر نسبی: هر چی بعد از توکن هست
-        if BOT_TOKEN in raw_path:
-            rel_path = raw_path.split(BOT_TOKEN, 1)[1].lstrip("/")
-        else:
-            # اگه توکن نبود، دو بخش آخر رو بردار
-            parts = [p for p in raw_path.split("/") if p]
-            rel_path = "/".join(parts[-2:]) if len(parts) >= 2 else raw_path.lstrip("/")
-
-        logging.info(f"[Restore] مسیر نسبی استخراج‌شده: {rel_path}")
-
-        sz = 0
-        # روش اول: URL از api.telegram.org (همیشه معتبره چون فایل اصلی رو دانلود می‌کنه)
-        try:
-            url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{rel_path}"
-            logging.info(f"[Restore] تلاش با: {url}")
-            async with aiohttp.ClientSession() as s:
-                async with s.get(url) as resp:
-                    if resp.status == 200:
-                        content = await resp.read()
-                        with open(tmp_path, "wb") as f:
-                            f.write(content)
-                        sz = os.path.getsize(tmp_path)
-                        logging.info(f"[Restore] موفق! {sz} بایت")
-            if sz == 0:
-                raise Exception("فایل خالی")
-        except Exception as e_telegram:
-            logging.warning(f"[Restore] api.telegram.org شکست: {e_telegram}")
-
-        # روش دوم: URL از سرور محلی (اگه TG_API_URL ست باشه)
-        if sz == 0 and LOCAL_API_URL:
-            try:
-                url = f"{LOCAL_API_URL.rstrip('/')}/file/bot{BOT_TOKEN}/{rel_path}"
-                logging.info(f"[Restore] تلاش سرور محلی: {url}")
-                async with aiohttp.ClientSession() as s:
-                    async with s.get(url) as resp:
-                        if resp.status == 200:
-                            content = await resp.read()
-                            with open(tmp_path, "wb") as f:
-                                f.write(content)
-                            sz = os.path.getsize(tmp_path)
-                            logging.info(f"[Restore] موفق از سرور محلی! {sz} بایت")
-            except Exception as e_local:
-                logging.warning(f"[Restore] سرور محلی شکست: {e_local}")
-
+        # روش واحد و مطمئن: bot.download خودش تشخیص میده از کدوم سرور فایل رو بگیره
+        # (چه سرور محلی فعال باشه چه نباشه)
+        await bot.download(file=doc.file_id, destination=tmp_path)
+        sz = os.path.getsize(tmp_path) if os.path.exists(tmp_path) else 0
         if sz == 0:
-            err_msg = f"هیچ روشی موفق نشد. rel_path={rel_path}, TG_API_URL={'فعال' if LOCAL_API_URL else 'خاموش'}"
-            raise Exception(err_msg)
+            raise Exception("فایل خالی دانلود شد")
+        logging.info(f"[Restore] فایل با bot.download دانلود شد: {sz} بایت")
 
         logging.info(f"[Restore] فایل دانلود شد: {sz} بایت")
 
@@ -2390,7 +2345,35 @@ async def spotify_download(callback: types.CallbackQuery):
     context_data.pop(callback.from_user.id, None)
     tmp = tempfile.mkdtemp()
     try:
-        import yt_dlp
+        info_title = "unknown"
+        # روش اول: spotdl (اگر نصب باشه و Spotify URL باشه)
+        if "open.spotify.com" in url:
+            try:
+                from spotdl import Spotdl
+                spot = Spotdl()
+                song_info = spot.search([url])
+                if song_info:
+                    info_title = f"{song_info[0].artist} - {song_info[0].name}"
+                    result = await asyncio.get_event_loop().run_in_executor(None, lambda: spot.download(song_info[0]))
+                    if result and len(result) > 0:
+                        fp = str(result[0])
+                        if fp and os.path.getsize(fp) > 0:
+                            sz = os.path.getsize(fp)
+                            if sz > MAX_UPLOAD_SIZE:
+                                return await prog.edit_text(f"❌ حجم بیش از {MAX_UPLOAD_LABEL}!")
+                            ext = os.path.splitext(fp)[1] or ".mp3"
+                            final_name = f"{info_title[:80]}{ext}"
+                            inp = FSInputFile(fp, filename=final_name)
+                            await callback.message.answer_audio(
+                                audio=inp, caption=f"🎵 <b>Spotify</b>\n{label}", title=info_title[:100], parse_mode="HTML"
+                            )
+                            await prog.delete()
+                            return
+            except Exception as e_spot:
+                logging.warning(f"spotdl failed: {e_spot}")
+                await prog.edit_text("⏳ spotdl ناموفق، تلاش با yt-dlp...")
+
+        # روش دوم: yt-dlp
         if q == "flac":
             post = [{"key": "FFmpegExtractAudio", "preferredcodec": "flac"}]
             label = "🎼 FLAC"
@@ -2403,11 +2386,11 @@ async def spotify_download(callback: types.CallbackQuery):
             "postprocessors": post,
             "quiet": True,
         }
-        loop = asyncio.get_event_loop()
         def dl():
             with yt_dlp.YoutubeDL(apply_cookies(opts)) as ydl:
-                ydl.download([url])
-        await loop.run_in_executor(None, dl)
+                return ydl.extract_info(url, download=True)
+        info = await asyncio.get_event_loop().run_in_executor(None, dl)
+        info_title = info.get("title", info_title) if info else info_title
         files = [str(p) for p in Path(tmp).glob("*") if p.is_file()]
         if not files:
             return await prog.edit_text("❌ فایلی دانلود نشد!")
@@ -2415,8 +2398,11 @@ async def spotify_download(callback: types.CallbackQuery):
         sz = os.path.getsize(fp)
         if sz > MAX_UPLOAD_SIZE:
             return await prog.edit_text(f"❌ حجم بیش از {MAX_UPLOAD_LABEL}!")
-        inp = FSInputFile(fp, filename=os.path.basename(fp))
-        await callback.message.answer_audio(audio=inp, caption=f"🎵 Spotify\n{label}", title=url[:30])
+        title_clean = info_title[:100]
+        ext = os.path.splitext(fp)[1] or ".mp3"
+        final_name = f"{title_clean}{ext}"
+        inp = FSInputFile(fp, filename=final_name)
+        await callback.message.answer_audio(audio=inp, caption=f"🎵 <b>{title_clean}</b>\n{label}", title=title_clean, parse_mode="HTML")
         await prog.delete()
     except Exception as e:
         await prog.edit_text(f"❌ خطا:\n{str(e)[:300]}")
