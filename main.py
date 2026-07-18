@@ -1210,31 +1210,16 @@ async def restore_database_finish(msg: types.Message):
         )
 
     tmp_path = DB + ".incoming"
-    logging.warning("=== RESTORE HANDLER v13 ===")
+    logging.warning("=== RESTORE HANDLER v14 (bot.download only) ===")
     try:
-        # برای ریستور از سرور رسمی تلگرام دانلود می‌کنیم.
-        # در حالت Local API، file_path یک مسیر مطلق روی هارد سرور است که
-        # حاوی BOT_TOKEN است. باید فقط بخش «نسبی» (بعد از توکن) را جدا کنیم.
-        file_info = await bot.get_file(doc.file_id)
-        raw = (file_info.file_path or "").replace("\\", "/")
-        if BOT_TOKEN in raw:
-            rel = raw.split(BOT_TOKEN, 1)[1].lstrip("/")
-        else:
-            rel = raw.lstrip("/")
-        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{rel}"
-        logging.info(f"[Restore] دانلود مستقیم از: {file_url}")
-
-        async with aiohttp.ClientSession() as s:
-            async with s.get(file_url) as resp:
-                if resp.status == 200:
-                    with open(tmp_path, "wb") as f:
-                        f.write(await resp.read())
-                else:
-                    return await msg.answer(f"❌ خطا در دانلود فایل (HTTP {resp.status})", reply_markup=admin_kb())
-
-        sz = os.path.getsize(tmp_path)
+        # بهترین روش: bot.download() هم روی سرور محلی و هم روی سرور رسمی کار می‌کنه.
+        # وقتی سرور محلی فعال باشد، aiogram به صورت خودکار از سرور Bot API محلی استفاده می‌کند.
+        await bot.download(file=doc.file_id, destination=tmp_path)
+        sz = os.path.getsize(tmp_path) if os.path.exists(tmp_path) else 0
         if sz == 0:
-            raise Exception("فایل خالی است.")
+            raise Exception("فایل خالی یا دانلود نشد. در حالت Local API فایل از سرور Bot API محلی در دسترس نیست.")
+
+        logging.info(f"[Restore] فایل با موفقیت دانلود شد: {sz} بایت")
 
         # اعتبارسنجی: جدول memes باید وجود داشته باشد
         test_conn = sqlite3.connect(tmp_path)
