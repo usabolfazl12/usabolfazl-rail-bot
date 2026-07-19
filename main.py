@@ -189,7 +189,6 @@ def admin_kb():
                 KeyboardButton(text="🗂 مدیریت میم‌ها"),
             ],
             [KeyboardButton(text="🗑 حذف میم"), KeyboardButton(text="📦 بکاپ دیتابیس")],
-            [KeyboardButton(text="🌐 دیتاسنتر")],
             [
                 KeyboardButton(text="📋 لیست کاربران"),
                 KeyboardButton(text="📋 لیست ادمین‌ها"),
@@ -1177,7 +1176,9 @@ async def backup_database(msg: types.Message):
 
 
 # ================= ریستور دیتابیس =================
-@dp.message(F.text == "♻️ ریستور دیتابیس")
+# (حذف شد — به دلیل تداخل با سرور محلی Bot API)
+
+
 # ================= دیتاسنتر (فیلهات و لینک مستقیم) =================
 @dp.message(F.text == "🌐 دیتاسنتر")
 async def datacenter_menu(msg: types.Message):
@@ -1249,20 +1250,67 @@ async def dc_download_start(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "dc_back")
 async def dc_back(callback: types.CallbackQuery):
     states.pop(callback.from_user.id, None)
-    await datacenter_menu(callback.message)
+    await dc_menu_from_callback(callback)
     await callback.answer()
 
 
-# 📤 دریافت فایل → ساخت لینک مستقیم
-@dp.message(F.document, lambda m: states.get(m.from_user.id) == "dc_upload")
+async def dc_menu_from_callback(callback: types.CallbackQuery):
+    """نمایش منوی دیتاسنتر از inline callback"""
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📤 فایل بفرست → لینک مستقیم بگیر", callback_data="dc_upload")],
+            [InlineKeyboardButton(text="📥 لینک مستقیم بده → فایل بگیر", callback_data="dc_download")],
+            [InlineKeyboardButton(text="🔙 بستن", callback_data="dc_close")],
+        ]
+    )
+    await callback.message.edit_text(
+        "🌐 **دیتاسنتر**\n\n"
+        "دو حالت داری:\n\n"
+        "**1️⃣ آپلود**: فایل بفرست، ربات لینک مستقیم دانلود (سرور محلی یا سرویس عمومی) رو می‌فرسته.\n"
+        "**2️⃣ دانلود**: روی 'لینک بده → فایل بگیر' بزن و لینک مستقیم رو بفرست، ربات فایل رو می‌گیره و برات می‌فرسته.",
+        reply_markup=kb,
+        parse_mode="Markdown",
+    )
+
+
+# 📤 دریافت هر نوع فایل → ساخت لینک مستقیم
+@dp.message(F.content_type.in_({"document", "video", "photo", "voice", "animation", "audio", "sticker"}),
+           lambda m: states.get(m.from_user.id) == "dc_upload")
 async def dc_upload_receive(msg: types.Message):
     if not is_admin(msg.from_user.id):
         return
     states.pop(msg.from_user.id, None)
-    doc = msg.document
+
+    file_id = None
+    fname_hint = "file"
+    if msg.document:
+        file_id = msg.document.file_id
+        fname_hint = msg.document.file_name or "document"
+    elif msg.video:
+        file_id = msg.video.file_id
+        fname_hint = msg.video.file_name or "video.mp4"
+    elif msg.photo:
+        file_id = msg.photo[-1].file_id  # بالاترین رزولوشن
+        fname_hint = "photo.jpg"
+    elif msg.voice:
+        file_id = msg.voice.file_id
+        fname_hint = "voice.ogg"
+    elif msg.animation:
+        file_id = msg.animation.file_id
+        fname_hint = msg.animation.file_name or "animation.mp4"
+    elif msg.audio:
+        file_id = msg.audio.file_id
+        fname_hint = msg.audio.file_name or "audio.mp3"
+    elif msg.sticker:
+        file_id = msg.sticker.file_id
+        fname_hint = "sticker.webp"
+
+    if not file_id:
+        return await msg.answer("❌ فایل معتبری پیدا نشد.", reply_markup=admin_kb())
+
     # گرفتن file_info برای ساخت URL
     try:
-        file_info = await bot.get_file(doc.file_id)
+        file_info = await bot.get_file(file_id)
     except Exception as e:
         logging.exception("get_file error")
         return await msg.answer(f"❌ خطا در دریافت اطلاعات فایل: {e}", reply_markup=admin_kb())
@@ -1285,10 +1333,10 @@ async def dc_upload_receive(msg: types.Message):
         direct = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{rel_path}"
         kind = "🍎 سرور عمومی تلگرام"
 
-    sz = (doc.file_size or 0) / (1024 * 1024)
+    sz = (file_info.file_size or 0) / (1024 * 1024)
     text = (
         f"✅ **لینک مستقیم فایل:**\n\n"
-        f"📄 نام: `{doc.file_name}`\n"
+        f"📄 نام: `{fname_hint}`\n"
         f"📦 حجم: `{sz:.2f} MB`\n"
         f"🔗 لینک: {direct}\n\n"
         f"(**سرویس:** {kind})\n\n"
@@ -1859,28 +1907,6 @@ async def back_to_admin_from_downloader(msg: types.Message):
 
 def split_file(path: str, limit: int) -> list:
     """تقسیم فایل به پارت‌های حداکثر `limit` بایت. برمی‌گرداند لیست مسیرهای پارت."""
-    import math
-    size = os.path.getsize(path)
-    n = max(1, math.ceil(size / limit))
-    part_size = math.ceil(size / n)
-    base = path + ".part"
-    parts = []
-    with open(path, "rb") as f:
-        for i in range(n):
-            chunk = f.read(part_size)
-            if not chunk:
-                break
-            pp = f"{base}{i+1:03d}"
-            with open(pp, "wb") as pf:
-                pf.write(chunk)
-            parts.append(pp)
-    return parts
-
-
-
-
-def split_file(path: str, limit: int) -> list:
-    """تقسیم فایل به پارت‌های حداکثر `limit` بایت."""
     import math
     size = os.path.getsize(path)
     n = max(1, math.ceil(size / limit))
