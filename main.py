@@ -189,6 +189,7 @@ def admin_kb():
                 KeyboardButton(text="🗂 مدیریت میم‌ها"),
             ],
             [KeyboardButton(text="🗑 حذف میم"), KeyboardButton(text="📦 بکاپ دیتابیس")],
+            [KeyboardButton(text="🌐 دیتاسنتر")],
             [
                 KeyboardButton(text="📋 لیست کاربران"),
                 KeyboardButton(text="📋 لیست ادمین‌ها"),
