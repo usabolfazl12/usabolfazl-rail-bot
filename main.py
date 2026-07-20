@@ -1388,6 +1388,8 @@ async def dc_upload_receive(msg: types.Message):
                         reply_markup=admin_kb(),
                     )
                 upload_url = (await resp_up.text()).strip()
+                # 0x0.st پاسخ رو به صورت متن plain می‌ده، بعضی وقتا newline اضافه داره
+                upload_url = upload_url.split("\\n")[0].strip()
                 upload_size = os.path.getsize(tmp_path)
 
         sz_mb = upload_size / (1024 * 1024)
@@ -3120,6 +3122,7 @@ async def soundcloud_download_track(callback: types.CallbackQuery):
         import yt_dlp
 
         loop = asyncio.get_running_loop()
+        sc_main_loop = asyncio.get_running_loop()
         last_percent = [0]
 
         def progress_hook(d):
