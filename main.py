@@ -1327,12 +1327,8 @@ async def dc_upload_receive(msg: types.Message):
         parts = [p for p in raw_path.split("/") if p]
         rel_path = "/".join(parts[-2:]) if len(parts) >= 2 else raw_path.lstrip("/")
 
-    if LOCAL_API_URL:
-        direct = f"{LOCAL_API_URL.rstrip('/')}/file/bot{BOT_TOKEN}/{rel_path}"
-        kind = "🟢 سرور محلی (Local Bot API)"
-    else:
-        direct = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{rel_path}"
-        kind = "🍎 سرور عمومی تلگرام"
+    direct = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{rel_path}"
+    kind = "🍎 تلگرام"
 
     # استخراج حجم واقعی فایل از خود پیام (نه file_info که این فیلد را ندارد)
     actual_sz = 0
@@ -2415,10 +2411,12 @@ async def spotify_do_search(msg: types.Message):
             dur_s = f"{dur // 60}:{dur % 60:02d}" if dur else ""
             url = e.get("webpage_url") or e.get("url") or ""
             results_text += f"{i}. {title} ({dur_s})\n"
+            context_data[f"sp_url_{i}"] = url
+            context_data[f"sp_title_{i}"] = title
             kb_rows.append([
                 InlineKeyboardButton(
                     text=f"{i}. {title[:35]}",
-                    callback_data=f"sp_dl|{i}|{url}",
+                    callback_data=f"sp_dl_{i}",
                 )
             ])
         kb_rows.append([InlineKeyboardButton(text="❌ بستن", callback_data="sp_close")])
@@ -2437,16 +2435,19 @@ async def spotify_close(callback: types.CallbackQuery):
     await callback.answer()
 
 
-@dp.callback_query(lambda c: c.data.startswith("sp_dl|"))
+@dp.callback_query(lambda c: c.data.startswith("sp_dl_"))
 async def spotify_select_track(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id):
         return await callback.answer("دسترسی ندارید", show_alert=True)
-    parts = callback.data.split("|", 2)
-    if len(parts) < 3:
-        return await callback.answer("bad data", show_alert=True)
-    idx = parts[1]
-    url = parts[2]
-    context_data[callback.from_user.id] = {"spotify_url": url, "spotify_idx": idx}
+    try:
+        idx = int(callback.data.split("_")[2])
+    except:
+        return await callback.answer("داده نامعتبر", show_alert=True)
+    url = context_data.get(f"sp_url_{idx}")
+    title = context_data.get(f"sp_title_{idx}", "آهنگ")
+    if not url:
+        return await callback.answer("لینک منقضی شده.", show_alert=True)
+    context_data[callback.from_user.id] = {"spotify_url": url, "spotify_title": title}
     await callback.answer()
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎵 128K MP3", callback_data=f"spdl_128")],
@@ -2475,7 +2476,7 @@ async def spotify_download(callback: types.CallbackQuery):
     context_data.pop(callback.from_user.id, None)
     tmp = tempfile.mkdtemp()
     try:
-        info_title = "unknown"
+        info_title = ud.get("spotify_title", "unknown")
         # روش اول: spotdl (اگر نصب باشه و Spotify URL باشه)
         if "open.spotify.com" in url:
             try:
