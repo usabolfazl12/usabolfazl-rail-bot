@@ -1353,14 +1353,14 @@ async def dc_upload_receive(msg: types.Message):
 
     sz_mb = (actual_sz or 0) / (1024 * 1024)
     text = (
-        f"✅ **لینک مستقیم فایل:**\n\n"
-        f"📄 نام: `{fname_hint}`\n"
-        f"📦 حجم: `{sz_mb:.2f} MB`\n"
-        f"🔗 لینک: {direct}\n\n"
-        f"(**سرویس:** {kind})\n\n"
+        f"✅ <b>لینک مستقیم فایل:</b>\\n\\n"
+        f"📄 نام: <code>{fname_hint}</code>\\n"
+        f"📦 حجم: <code>{sz_mb:.2f} MB</code>\\n"
+        f"🔗 لینک:\\n<code>{direct}</code>\\n\\n"
+        f"(<b>سرویس:</b> {kind})\\n\\n"
         f"⚠️ این لینک رو عمومی نکن — مستقیم به حساب رباتت متصله."
     )
-    await msg.answer(text, parse_mode="Markdown", reply_markup=admin_kb())
+    await msg.answer(text, parse_mode="HTML", reply_markup=admin_kb())
 
 
 # 📥 دریافت لینک → دانلود فایل و ارسال
@@ -2011,7 +2011,7 @@ async def youtube_get_url(msg: types.Message):
             with yt_dlp.YoutubeDL(apply_cookies(ydl_opts)) as ydl:
                 return ydl.extract_info(url, download=False)
 
-        info = await asyncio.get_event_loop().run_in_executor(None, get_info)
+        info = await asyncio.get_running_loop().run_in_executor(None, get_info)
         title = info.get("title", "ویدیو")
         dur = info.get("duration", 0)
         dur_s = f"{dur // 60}:{dur % 60:02d}" if dur else "نامشخص"
@@ -2118,7 +2118,7 @@ async def youtube_download_callback(callback: types.CallbackQuery):
                                 f"🚀 {d.get('_speed_str','نامشخص')} | ⏳ {d.get('_eta_str','نامشخص')}",
                                 parse_mode="Markdown",
                             ),
-                            asyncio.get_event_loop(),
+                            asyncio.get_running_loop(),
                         )
                 except Exception:
                     pass
@@ -2166,7 +2166,7 @@ async def youtube_download_callback(callback: types.CallbackQuery):
                 ydl.download([url])
 
         await prog.edit_text(f"⬇️ **دانلود {label}...**\n{make_progress_bar(0)}\n⏳ صبر کنید...", parse_mode="Markdown")
-        await asyncio.get_event_loop().run_in_executor(None, dl)
+        await asyncio.get_running_loop().run_in_executor(None, dl)
 
         files = [str(p) for p in Path(tmp).glob("*") if p.is_file()]
         if not files:
@@ -2249,7 +2249,7 @@ async def instagram_get_url(msg: types.Message):
             with yt_dlp.YoutubeDL(apply_cookies(ydl_opts)) as ydl:
                 return ydl.extract_info(url, download=False)
 
-        info = await asyncio.get_event_loop().run_in_executor(None, get_info)
+        info = await asyncio.get_running_loop().run_in_executor(None, get_info)
         title = info.get("title", "اینستاگرام") or "پست اینستاگرام"
         context_data[msg.from_user.id]["title"] = title
 
@@ -2333,7 +2333,7 @@ async def instagram_download_callback(callback: types.CallbackQuery):
                 ydl.download([url])
 
         await prog.edit_text("⬇️ <b>در حال دانلود از اینستاگرام...</b>\n⏳ صبر کنید...", parse_mode="HTML")
-        await asyncio.get_event_loop().run_in_executor(None, dl)
+        await asyncio.get_running_loop().run_in_executor(None, dl)
 
         files = [str(p) for p in Path(tmp).glob("*") if p.is_file()]
         if not files:
@@ -2395,7 +2395,7 @@ async def spotify_do_search(msg: types.Message):
     try:
         import yt_dlp
         ydl_opts = {"quiet": True, "no_warnings": True, "extract_flat": True}
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         def search():
             with yt_dlp.YoutubeDL(apply_cookies(ydl_opts)) as ydl:
                 return ydl.extract_info(f"ytsearch10:{query} audio", download=False)
@@ -2485,7 +2485,7 @@ async def spotify_download(callback: types.CallbackQuery):
                 song_info = spot.search([url])
                 if song_info:
                     info_title = f"{song_info[0].artist} - {song_info[0].name}"
-                    result = await asyncio.get_event_loop().run_in_executor(None, lambda: spot.download(song_info[0]))
+                    result = await asyncio.get_running_loop().run_in_executor(None, lambda: spot.download(song_info[0]))
                     if result and len(result) > 0:
                         fp = str(result[0])
                         if fp and os.path.getsize(fp) > 0:
@@ -2541,7 +2541,7 @@ async def spotify_download(callback: types.CallbackQuery):
                     total_bytes = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
                     asyncio.run_coroutine_threadsafe(
                         update_prog(int(pct), downloaded, total_bytes),
-                        asyncio.get_event_loop()
+                        asyncio.get_running_loop()
                     )
                 except Exception:
                     pass
@@ -2550,7 +2550,7 @@ async def spotify_download(callback: types.CallbackQuery):
                 total_bytes = d.get("total_bytes") or 0
                 asyncio.run_coroutine_threadsafe(
                     update_prog(100, total_bytes, total_bytes),
-                    asyncio.get_event_loop()
+                    asyncio.get_running_loop()
                 )
 
         opts = {
@@ -2563,7 +2563,7 @@ async def spotify_download(callback: types.CallbackQuery):
         def dl():
             with yt_dlp.YoutubeDL(apply_cookies(opts)) as ydl:
                 return ydl.extract_info(url, download=True)
-        info = await asyncio.get_event_loop().run_in_executor(None, dl)
+        info = await asyncio.get_running_loop().run_in_executor(None, dl)
         info_title = info.get("title", info_title) if info else info_title
         files = [str(p) for p in Path(tmp).glob("*") if p.is_file()]
         if not files:
@@ -2747,7 +2747,7 @@ async def deezer_download_track(callback: types.CallbackQuery):
         )
 
         # استفاده از spotdl با ISRC یا نام آهنگ برای دانلود
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         search_query = f"{track_title} {artist_name}"
 
@@ -2904,7 +2904,7 @@ async def soundcloud_do_search(msg: types.Message):
     try:
         import yt_dlp
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def do_search():
             ydl_opts = {
@@ -3057,7 +3057,7 @@ async def soundcloud_download_track(callback: types.CallbackQuery):
     try:
         import yt_dlp
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         last_percent = [0]
 
         def progress_hook(d):
@@ -3080,7 +3080,7 @@ async def soundcloud_download_track(callback: types.CallbackQuery):
                                 f"🚀 سرعت: {speed}\n"
                                 f"⏳ زمان باقیمانده: {eta}",
                             ),
-                            asyncio.get_event_loop(),
+                            asyncio.get_running_loop(),
                         )
                 except:
                     pass
