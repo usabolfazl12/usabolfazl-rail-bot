@@ -2102,6 +2102,7 @@ async def youtube_download_callback(callback: types.CallbackQuery):
     context_data.pop(uid, None)
 
     tmp = tempfile.mkdtemp()
+    main_loop = asyncio.get_running_loop()  # ذخیره loop اصلی قبل از اجرای thread
     try:
         import yt_dlp
 
@@ -2118,7 +2119,7 @@ async def youtube_download_callback(callback: types.CallbackQuery):
                                 f"🚀 {d.get('_speed_str','نامشخص')} | ⏳ {d.get('_eta_str','نامشخص')}",
                                 parse_mode="Markdown",
                             ),
-                            asyncio.get_running_loop(),
+                            main_loop,
                         )
                 except Exception:
                     pass
@@ -2474,6 +2475,7 @@ async def spotify_download(callback: types.CallbackQuery):
     await callback.answer()
     prog = await callback.message.edit_text("⏳ در حال دانلود...")
     context_data.pop(callback.from_user.id, None)
+    main_loop = asyncio.get_running_loop()  # برای استفاده در hook
     tmp = tempfile.mkdtemp()
     try:
         info_title = ud.get("spotify_title", "unknown")
@@ -2541,7 +2543,7 @@ async def spotify_download(callback: types.CallbackQuery):
                     total_bytes = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
                     asyncio.run_coroutine_threadsafe(
                         update_prog(int(pct), downloaded, total_bytes),
-                        asyncio.get_running_loop()
+                        main_loop
                     )
                 except Exception:
                     pass
@@ -2550,7 +2552,7 @@ async def spotify_download(callback: types.CallbackQuery):
                 total_bytes = d.get("total_bytes") or 0
                 asyncio.run_coroutine_threadsafe(
                     update_prog(100, total_bytes, total_bytes),
-                    asyncio.get_running_loop()
+                    main_loop
                 )
 
         opts = {
@@ -3080,7 +3082,7 @@ async def soundcloud_download_track(callback: types.CallbackQuery):
                                 f"🚀 سرعت: {speed}\n"
                                 f"⏳ زمان باقیمانده: {eta}",
                             ),
-                            asyncio.get_running_loop(),
+                            loop,
                         )
                 except:
                     pass
