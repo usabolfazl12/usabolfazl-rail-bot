@@ -1320,17 +1320,15 @@ async def dc_upload_receive(msg: types.Message):
     if not raw_path:
         return await msg.answer("❌ file_path خالی برگشت.", reply_markup=admin_kb())
 
-    # ساخت لینک از سرور محلی (اگه فعال باشه) یا عمومی تلگرام
+    # فایل را اول از تلگرام دانلود می‌کنیم، بعد روی سرویس عمومی 0x0.st آپلود می‌کنیم
+    # تا لینک واقعاً عمومی باشه (نه لینک temporary تلگرام)
     if BOT_TOKEN in raw_path:
         rel_path = raw_path.split(BOT_TOKEN, 1)[1].lstrip("/")
     else:
         parts = [p for p in raw_path.split("/") if p]
         rel_path = "/".join(parts[-2:]) if len(parts) >= 2 else raw_path.lstrip("/")
 
-    direct = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{rel_path}"
-    kind = "🍎 تلگرام"
-
-    # استخراج حجم واقعی فایل از خود پیام (نه file_info که این فیلد را ندارد)
+    tg_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{rel_path}"
     actual_sz = 0
     if msg.document:
         actual_sz = msg.document.file_size or 0
@@ -1344,23 +1342,85 @@ async def dc_upload_receive(msg: types.Message):
         actual_sz = msg.audio.file_size or 0
     elif msg.sticker:
         actual_sz = msg.sticker.file_size or 0
-    # عکس‌ها در تلگرام چند رزولوشن دارن و فیلد file_size در photo[-1] است
     if not actual_sz and msg.photo and len(msg.photo) > 0:
         for p in reversed(msg.photo):
             if p.file_size:
                 actual_sz = p.file_size
                 break
 
-    sz_mb = (actual_sz or 0) / (1024 * 1024)
-    text = (
-        f"✅ <b>لینک مستقیم فایل:</b>\\n\\n"
-        f"📄 نام: <code>{fname_hint}</code>\\n"
-        f"📦 حجم: <code>{sz_mb:.2f} MB</code>\\n"
-        f"🔗 لینک:\\n<code>{direct}</code>\\n\\n"
-        f"(<b>سرویس:</b> {kind})\\n\\n"
-        f"⚠️ این لینک رو عمومی نکن — مستقیم به حساب رباتت متصله."
-    )
-    await msg.answer(text, parse_mode="HTML", reply_markup=admin_kb())
+    status_msg = await msg.answer("⬇️ در حال دریافت فایل از تلگرام...")
+    tmp_path = f"/tmp/dc_{msg.from_user.id}_{int(datetime.datetime.utcnow().timestamp())}_{fname_hint}"
+    try:
+        # ۱) دانلود از تلگرام
+        async with aiohttp.ClientSession() as s:
+            async with s.get(tg_url) as resp:
+                if resp.status != 200:
+                    return await status_msg.edit_text(f"❌ خطای دانلود از تلگرام: HTTP {resp.status}", reply_markup=admin_kb())
+                with open(tmp_path, "wb") as f:
+                    async for chunk in resp.content.iter_chunked(64 * 1024):
+                        f.write(chunk)
+
+        # ۲) آپلود روی 0x0.st (سرویس رایگان، فایل expire=24h)
+        await status_msg.edit_text("📤 در حال آپلود روی سرور عمومی (0x0.st)...")
+        ext = os.path.splitext(fname_hint)[1] or ".bin"
+        mime_guess = "application/octet-stream"
+        if ext in [".mp4", ".webm", ".mov"]:
+            mime_guess = "video/mp4"
+        elif ext in [".mp3", ".flac", ".ogg", ".m4a"]:
+            mime_guess = f"audio/{ext.lstrip('.')}" if ext.lstrip(".") in ["mp3", "ogg", "m4a"] else "audio/flac"
+        elif ext in [".jpg", ".jpeg", ".png", ".webp"]:
+            mime_guess = f"image/{ext.lstrip('.').replace('jpg', 'jpeg')}"
+
+        data = aiohttp.FormData()
+        data.add_field("file", open(tmp_path, "rb"), filename=fname_hint, content_type=mime_guess)
+        data.add_field("expires", "24")  # فایل ۲۴ ساعت بعد expire میشه
+
+        async with aiohttp.ClientSession() as s:
+            async with s.post(
+                "https://0x0.st",
+                data=data,
+                headers={"User-Agent": "curl/7.68.0"},
+            ) as resp_up:
+                if resp_up.status != 200:
+                    err = await resp_up.text()
+                    return await status_msg.edit_text(
+                        f"❌ خطای 0x0.st: HTTP {resp_up.status}\n{err[:200]}",
+                        reply_markup=admin_kb(),
+                    )
+                upload_url = (await resp_up.text()).strip()
+                upload_size = os.path.getsize(tmp_path)
+
+        sz_mb = upload_size / (1024 * 1024)
+        text = (
+            f"✅ <b>لینک عمومی فایل:</b>\\n\\n"
+            f"📄 نام: <code>{fname_hint}</code>\\n"
+            f"📦 حجم: <code>{sz_mb:.2f} MB</code>\\n"
+            f"🔗 لینک:\\n<code>{upload_url}</code>\\n\\n"
+            f"(<b>سرویس:</b> 🌍 0x0.st — لینک عمومی ۲۴ ساعته)\\n\\n"
+            f"⚠️ این لینک public هست — هر کس داشته باشه می‌تونه تا ۲۴ ساعت دانلود کنه."
+        )
+        await status_msg.edit_text(text, parse_mode="HTML", reply_markup=admin_kb())
+    except Exception as e:
+        logging.exception("dc_upload error")
+        # FALLBACK: اگه 0x0.st قطع بود، لینک موقتی تلگرام بدیم
+        try:
+            fallback_url = tg_url
+            sz_mb = actual_sz / (1024 * 1024)
+            text = (
+                f"⚠️ <b>سرویس 0x0.st قطع شد — لینک موقتی تلگرام:</b>\\n\\n"
+                f"📄 نام: <code>{fname_hint}</code>\\n"
+                f"📦 حجم: <code>{sz_mb:.2f} MB</code>\\n"
+                f"🔗 لینک:\\n<code>{fallback_url}</code>\\n\\n"
+                f"⏰ این لینک فقط موقته — تا ۲ ساعت دیگه expire میشه."
+            )
+            await status_msg.edit_text(text, parse_mode="HTML", reply_markup=admin_kb())
+        except:
+            await status_msg.edit_text(f"❌ خطا: {str(e)[:300]}", reply_markup=admin_kb())
+    finally:
+        try:
+            os.remove(tmp_path)
+        except:
+            pass
 
 
 # 📥 دریافت لینک → دانلود فایل و ارسال
