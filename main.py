@@ -1334,11 +1334,32 @@ async def dc_upload_receive(msg: types.Message):
         direct = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{rel_path}"
         kind = "🍎 سرور عمومی تلگرام"
 
-    sz = (file_info.file_size or 0) / (1024 * 1024)
+    # استخراج حجم واقعی فایل از خود پیام (نه file_info که این فیلد را ندارد)
+    actual_sz = 0
+    if msg.document:
+        actual_sz = msg.document.file_size or 0
+    elif msg.video:
+        actual_sz = msg.video.file_size or 0
+    elif msg.voice:
+        actual_sz = msg.voice.file_size or 0
+    elif msg.animation:
+        actual_sz = msg.animation.file_size or 0
+    elif msg.audio:
+        actual_sz = msg.audio.file_size or 0
+    elif msg.sticker:
+        actual_sz = msg.sticker.file_size or 0
+    # عکس‌ها در تلگرام چند رزولوشن دارن و فیلد file_size در photo[-1] است
+    if not actual_sz and msg.photo and len(msg.photo) > 0:
+        for p in reversed(msg.photo):
+            if p.file_size:
+                actual_sz = p.file_size
+                break
+
+    sz_mb = (actual_sz or 0) / (1024 * 1024)
     text = (
         f"✅ **لینک مستقیم فایل:**\n\n"
         f"📄 نام: `{fname_hint}`\n"
-        f"📦 حجم: `{sz:.2f} MB`\n"
+        f"📦 حجم: `{sz_mb:.2f} MB`\n"
         f"🔗 لینک: {direct}\n\n"
         f"(**سرویس:** {kind})\n\n"
         f"⚠️ این لینک رو عمومی نکن — مستقیم به حساب رباتت متصله."
@@ -1356,7 +1377,7 @@ async def dc_download_url(msg: types.Message):
     if not (url.startswith("http://") or url.startswith("https://")):
         return await msg.answer("❌ باید یه لینک http/https معتبر باشه.", reply_markup=admin_kb())
 
-    wait = await msg.answer("⏳ در حال دانلود...", reply_markup=admin_kb())
+    wait = await msg.answer("⏳ در حال دانلود...\n[░░░░░░░░░░░░░░░░░░░░] 0.0%", reply_markup=admin_kb())
     tmp = tempfile.mkdtemp()
     try:
         async with aiohttp.ClientSession() as s:
@@ -1374,12 +1395,30 @@ async def dc_download_url(msg: types.Message):
                 # از آخر URL حدس می‌زنیم پسوند
                 ext = os.path.splitext(fname)[1] or ""
                 fp = os.path.join(tmp, fname if fname else "file" + ext)
+                # نوار پیشرفت واقعی بر اساس Content-Length
+                total = int(resp.headers.get("Content-Length") or 0)
+                downloaded = 0
+                last_pct = [0]
                 with open(fp, "wb") as f:
                     while True:
                         chunk = await resp.content.read(64 * 1024)
                         if not chunk:
                             break
                         f.write(chunk)
+                        downloaded += len(chunk)
+                        if total > 0:
+                            pct = int(downloaded * 100 / total)
+                            # فقط هر ۵٪ آپدیت کنیم تا اسپم نشه
+                            if pct - last_pct[0] >= 5 or pct >= 100:
+                                last_pct[0] = pct
+                                bar = make_progress_bar(pct)
+                                try:
+                                    await wait.edit_text(
+                                        f"⬇️ در حال دانلود...\n{bar}\n"
+                                        f"📦 {downloaded/1024/1024:.2f} MB / {total/1024/1024:.2f} MB"
+                                    )
+                                except Exception:
+                                    pass
         sz = os.path.getsize(fp)
         if sz <= 0:
             return await wait.edit_text("❌ فایل خالی برگشت.", reply_markup=admin_kb())
@@ -2472,11 +2511,53 @@ async def spotify_download(callback: types.CallbackQuery):
         else:
             post = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": q}]
             label = f"🎵 MP3 {q}K"
+
+        last_pct = [0]
+        async def update_prog(pct, downloaded, total_bytes):
+            if pct - last_pct[0] >= 5 or pct >= 100:
+                last_pct[0] = pct
+                bar = make_progress_bar(pct)
+                d_mb = downloaded / 1024 / 1024 if downloaded else 0
+                t_mb = total_bytes / 1024 / 1024 if total_bytes else 0
+                size_text = f"{d_mb:.2f} MB" if t_mb <= 0 else f"{d_mb:.2f} / {t_mb:.2f} MB"
+                try:
+                    await prog.edit_text(
+                        f"⬇️ در حال دانلود {label}...\n{bar}\n📦 {size_text}",
+                        parse_mode="HTML"
+                    )
+                except Exception:
+                    pass
+
+        def hook(d):
+            if d.get("status") == "downloading":
+                try:
+                    raw = (d.get("_percent_str", "0%") or "0%")
+                    # حذف کاراکترهای رنگی ANSI و کاراکترهای اضافی
+                    import re as _re
+                    cleaned = _re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", raw)
+                    pct = float(cleaned.replace("%", "").strip() or 0)
+                    downloaded = d.get("downloaded_bytes") or 0
+                    total_bytes = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+                    asyncio.run_coroutine_threadsafe(
+                        update_prog(int(pct), downloaded, total_bytes),
+                        asyncio.get_event_loop()
+                    )
+                except Exception:
+                    pass
+            elif d.get("status") == "finished":
+                # آخرین آپدیت با ۱۰۰٪
+                total_bytes = d.get("total_bytes") or 0
+                asyncio.run_coroutine_threadsafe(
+                    update_prog(100, total_bytes, total_bytes),
+                    asyncio.get_event_loop()
+                )
+
         opts = {
             "format": "bestaudio/best",
             "outtmpl": os.path.join(tmp, "%(title)s.%(ext)s"),
             "postprocessors": post,
             "quiet": True,
+            "progress_hooks": [hook],
         }
         def dl():
             with yt_dlp.YoutubeDL(apply_cookies(opts)) as ydl:
@@ -2494,7 +2575,14 @@ async def spotify_download(callback: types.CallbackQuery):
         ext = os.path.splitext(fp)[1] or ".mp3"
         final_name = f"{title_clean}{ext}"
         inp = FSInputFile(fp, filename=final_name)
-        await callback.message.answer_audio(audio=inp, caption=f"🎵 <b>{title_clean}</b>\n{label}", title=title_clean, parse_mode="HTML")
+        # نمایش حجم نهایی فایل
+        sz_str = f"{sz/1024/1024:.2f} MB"
+        await callback.message.answer_audio(
+            audio=inp,
+            caption=f"🎵 <b>{title_clean}</b>\n{label}\n📦 {sz_str}",
+            title=title_clean,
+            parse_mode="HTML"
+        )
         await prog.delete()
     except Exception as e:
         await prog.edit_text(f"❌ خطا:\n{str(e)[:300]}")
