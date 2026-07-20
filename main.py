@@ -1355,13 +1355,13 @@ async def dc_upload_receive(msg: types.Message):
         async with aiohttp.ClientSession() as s:
             async with s.get(tg_url) as resp:
                 if resp.status != 200:
-                    return await status_msg.edit_text(f"❌ خطای دانلود از تلگرام: HTTP {resp.status}", reply_markup=admin_kb())
+                    return await status_msg.answer(f"❌ خطای دانلود از تلگرام: HTTP {resp.status}", reply_markup=admin_kb())
                 with open(tmp_path, "wb") as f:
                     async for chunk in resp.content.iter_chunked(64 * 1024):
                         f.write(chunk)
 
         # ۲) آپلود روی 0x0.st (سرویس رایگان، فایل expire=24h)
-        await status_msg.edit_text("📤 در حال آپلود روی سرور عمومی (0x0.st)...")
+        await status_msg.answer("📤 در حال آپلود روی سرور عمومی (0x0.st)...")
         ext = os.path.splitext(fname_hint)[1] or ".bin"
         mime_guess = "application/octet-stream"
         if ext in [".mp4", ".webm", ".mov"]:
@@ -1383,7 +1383,7 @@ async def dc_upload_receive(msg: types.Message):
             ) as resp_up:
                 if resp_up.status != 200:
                     err = await resp_up.text()
-                    return await status_msg.edit_text(
+                    return await status_msg.answer(
                         f"❌ خطای 0x0.st: HTTP {resp_up.status}\n{err[:200]}",
                         reply_markup=admin_kb(),
                     )
@@ -1401,7 +1401,7 @@ async def dc_upload_receive(msg: types.Message):
             f"(<b>سرویس:</b> 🌍 0x0.st — لینک عمومی ۲۴ ساعته)\\n\\n"
             f"⚠️ این لینک public هست — هر کس داشته باشه می‌تونه تا ۲۴ ساعت دانلود کنه."
         )
-        await status_msg.edit_text(text, parse_mode="HTML", reply_markup=admin_kb())
+        await status_msg.answer(text, parse_mode="HTML", reply_markup=admin_kb())
     except Exception as e:
         logging.exception("dc_upload error")
         # FALLBACK: اگه 0x0.st قطع بود، لینک موقتی تلگرام بدیم
@@ -1415,9 +1415,9 @@ async def dc_upload_receive(msg: types.Message):
                 f"🔗 لینک:\\n<code>{fallback_url}</code>\\n\\n"
                 f"⏰ این لینک فقط موقته — تا ۲ ساعت دیگه expire میشه."
             )
-            await status_msg.edit_text(text, parse_mode="HTML", reply_markup=admin_kb())
+            await status_msg.answer(text, parse_mode="HTML", reply_markup=admin_kb())
         except:
-            await status_msg.edit_text(f"❌ خطا: {str(e)[:300]}", reply_markup=admin_kb())
+            await status_msg.answer(f"❌ خطا: {str(e)[:300]}", reply_markup=admin_kb())
     finally:
         try:
             os.remove(tmp_path)
@@ -3212,11 +3212,14 @@ async def soundcloud_download_track(callback: types.CallbackQuery):
         await progress_msg.delete()
 
     except Exception as e:
-        await progress_msg.edit_text(f"❌ خطا:\n{str(e)[:300]}")
+        err_msg = str(e)[:300]
+        if "DRM" in err_msg or "drm" in err_msg.lower() or "protected" in err_msg.lower():
+            await progress_msg.edit_text("🔒 این آهنگ SoundCloud محافظت‌شده (DRM) است و قابل دانلود نیست.")
+        else:
+            await progress_msg.edit_text(f"❌ خطا:\n{err_msg}")
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         context_data.pop(callback.from_user.id, None)
-        # پاک کردن hash از context
         context_data.pop(f"sc_{url_hash}", None)
 
 
