@@ -1375,22 +1375,51 @@ async def dc_upload_receive(msg: types.Message):
         data.add_field("file", open(tmp_path, "rb"), filename=fname_hint, content_type=mime_guess)
         data.add_field("expires", "24")  # فایل ۲۴ ساعت بعد expire میشه
 
-        async with aiohttp.ClientSession() as s:
-            async with s.post(
-                "https://0x0.st",
-                data=data,
-                headers={"User-Agent": "curl/7.68.0"},
-            ) as resp_up:
-                if resp_up.status != 200:
-                    err = await resp_up.text()
-                    return await status_msg.answer(
-                        f"❌ خطای 0x0.st: HTTP {resp_up.status}\n{err[:200]}",
-                        reply_markup=admin_kb(),
-                    )
-                upload_url = (await resp_up.text()).strip()
-                # 0x0.st پاسخ رو به صورت متن plain می‌ده، بعضی وقتا newline اضافه داره
-                upload_url = upload_url.split("\\n")[0].strip()
-                upload_size = os.path.getsize(tmp_path)
+        # سرویس‌های آپلود عمومی رایگان. catbox.moe بهترین گزینه‌ست چون هیچ API key نمی‌خواد
+        # و تا ۲۰۰MB ساپورت می‌کنه و توسط ربات‌ها بلاک نمیشه.
+        upload_services = [
+            ("https://catbox.moe/user/api.php", {"reqtype": "fileupload"}, "catbox.moe"),
+            ("https://x0r.st/api/upload", None, "x0r.st"),  # fallback اگه catbox fail
+        ]
+
+        upload_url = None
+        upload_kind = None
+        for ep, extra_data, kind in upload_services:
+            try:
+                # برای catbox باید fileToUpload باشه (نه file)
+                files = None
+                if "catbox" in ep:
+                    files = {"fileToUpload": open(tmp_path, "rb")}
+                else:
+                    files = {"file": open(tmp_path, "rb")}
+
+                if extra_data:
+                    form = aiohttp.FormData()
+                    for k, v in extra_data.items():
+                        form.add_field(k, v)
+                    form.add_field("fileToUpload", open(tmp_path, "rb"), filename=fname_hint, content_type=mime_guess)
+                else:
+                    form = aiohttp.FormData()
+                    form.add_field("file", open(tmp_path, "rb"), filename=fname_hint, content_type=mime_guess)
+
+                async with aiohttp.ClientSession() as s:
+                    async with s.post(ep, data=form, timeout=aiohttp.ClientTimeout(total=60)) as resp_up:
+                        if resp_up.status == 200:
+                            text = (await resp_up.text()).strip().split("\n")[0].strip()
+                            # بررسی اینکه خروجی URL معتبر باشه
+                            if text.startswith("http://") or text.startswith("https://"):
+                                upload_url = text
+                                upload_kind = f"☁️ {kind}"
+                                break
+            except Exception as ex:
+                logging.warning(f"{kind} failed: {ex}")
+                continue
+
+        if not upload_url:
+            # fallback به لینک موقت تلگرام
+            upload_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{rel_path}"
+            upload_kind = "🍎 تلگرام (موقت — fallback)"
+        upload_size = os.path.getsize(tmp_path)
 
         sz_mb = upload_size / (1024 * 1024)
         text = (
